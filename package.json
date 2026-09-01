@@ -1,0 +1,14 @@
+{
+  "name": "yyt-cart-adder",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tampermonkey userscript for reviewing and adding Weiss Schwarz cards to a YYT cart.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test --test-isolation=none"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}
