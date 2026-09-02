@@ -13,7 +13,8 @@ function uiRow(row) {
     gid: product?.gid,
     ver: product?.ver,
     cid: product?.cid,
-    kizu: product?.kizu,
+    kizu: row.kizu ?? product?.kizu,
+    condition: row.condition ?? product?.condition ?? (product?.kizu === "0" ? "normal" : "damaged"),
     limit: product?.limit,
   };
 }
@@ -24,6 +25,7 @@ mountApp({
     const resolved = await lookupProducts(requests, {
       signal: options.signal,
       delayMs: 250,
+      conditionPreference: options.conditionPreference,
     });
     return resolved.rows.map(uiRow);
   },

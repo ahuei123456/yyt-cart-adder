@@ -26,6 +26,7 @@ test("parses the exact available product fixture", () => {
     ver: "key2.0",
     cid: "10190",
     kizu: "0",
+    condition: "normal",
     stock: 1,
     limit: 1,
     priceYen: 12800,
@@ -35,6 +36,17 @@ test("parses the exact available product fixture", () => {
     soldOut: false,
     available: true,
   });
+});
+
+test("parses damaged products when kizu is non-zero", () => {
+  const report = parseSearchResults(fixture("search-with-damaged.html"));
+  assert.equal(report.structureError, false);
+  assert.equal(report.products.length, 2);
+  const damaged = report.products.find((p) => p.condition === "damaged");
+  assert.ok(damaged);
+  assert.equal(damaged.kizu, "1");
+  assert.equal(damaged.priceYen, 10000);
+  assert.equal(damaged.stock, 3);
 });
 
 test("uses the card image alt when the visible ID span is absent", () => {

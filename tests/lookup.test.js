@@ -155,3 +155,55 @@ test("retries transient search failures but does not retry definite client error
   );
   assert.equal(badAttempts, 1);
 });
+
+test("allocates condition quantities based on prefer-damaged preference", async () => {
+  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const result = await lookupProducts(
+    [{ originalId: "Kka/W102-005SEC", requestedQuantity: 4, sourceLines: [1] }],
+    { fetch: mock.fetch, delayMs: 0, conditionPreference: "prefer-damaged" },
+  );
+
+  assert.equal(result.rows.length, 2);
+  const damaged = result.rows.find((r) => r.condition === "damaged");
+  const normal = result.rows.find((r) => r.condition === "normal");
+  assert.ok(damaged);
+  assert.ok(normal);
+  assert.equal(damaged.plannedQuantity, 3);
+  assert.equal(damaged.selected, true);
+  assert.equal(damaged.priceYen, 10000);
+  assert.equal(normal.plannedQuantity, 1);
+  assert.equal(normal.selected, true);
+  assert.equal(normal.priceYen, 12800);
+});
+
+test("allocates condition quantities based on prefer-normal preference", async () => {
+  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const result = await lookupProducts(
+    [{ originalId: "Kka/W102-005SEC", requestedQuantity: 4, sourceLines: [1] }],
+    { fetch: mock.fetch, delayMs: 0, conditionPreference: "prefer-normal" },
+  );
+
+  assert.equal(result.rows.length, 2);
+  const normal = result.rows.find((r) => r.condition === "normal");
+  const damaged = result.rows.find((r) => r.condition === "damaged");
+  assert.equal(normal.plannedQuantity, 2);
+  assert.equal(normal.selected, true);
+  assert.equal(damaged.plannedQuantity, 2);
+  assert.equal(damaged.selected, true);
+});
+
+test("respects explicit damaged condition request while keeping normal option available", async () => {
+  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const result = await lookupProducts(
+    [{ originalId: "Kka/W102-005SEC", requestedQuantity: 2, condition: "damaged", sourceLines: [1] }],
+    { fetch: mock.fetch, delayMs: 0 },
+  );
+
+  assert.equal(result.rows.length, 2);
+  const damaged = result.rows.find((r) => r.condition === "damaged");
+  const normal = result.rows.find((r) => r.condition === "normal");
+  assert.equal(damaged.plannedQuantity, 2);
+  assert.equal(damaged.selected, true);
+  assert.equal(normal.plannedQuantity, 0);
+  assert.equal(normal.selected, false);
+});

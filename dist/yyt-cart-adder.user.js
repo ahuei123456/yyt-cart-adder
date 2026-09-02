@@ -68,6 +68,17 @@
       ...normalizedId ? { normalizedId } : {}
     };
   }
+  function parseConditionToken(token) {
+    if (typeof token !== "string") return null;
+    const lower = token.trim().toLowerCase();
+    if (lower === "damaged" || lower === "damage" || lower === "kizu" || lower === "1") {
+      return "damaged";
+    }
+    if (lower === "normal" || lower === "0") {
+      return "normal";
+    }
+    return null;
+  }
   function parseLine(raw, lineNumber) {
     const trimmed = raw.trim();
     if (!trimmed || trimmed.startsWith("#")) {
@@ -96,17 +107,14 @@
         })
       };
     }
-    let quantityText = idMatch[2]?.trim() ?? "";
-    if (!quantityText) {
+    const remainder = idMatch[2]?.trim() ?? "";
+    if (!remainder) {
       return {
         kind: "request",
         request: { originalId, normalizedId, quantity: 1, lineNumber }
       };
     }
-    if (quantityText.startsWith(",")) {
-      quantityText = quantityText.slice(1).trim();
-    }
-    if (!INTEGER_PATTERN.test(quantityText)) {
+    if (remainder.includes(",,") || remainder.endsWith(",")) {
       return {
         kind: "error",
         error: makeInputError({
@@ -118,8 +126,85 @@
         })
       };
     }
-    const quantity = Number(quantityText);
-    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 99) {
+    const tokens = remainder.split(/[\s,]+/u).filter(Boolean);
+    let quantity = 1;
+    let condition = null;
+    if (tokens.length === 1) {
+      if (INTEGER_PATTERN.test(tokens[0])) {
+        const parsedQty = Number(tokens[0]);
+        if (!Number.isSafeInteger(parsedQty) || parsedQty < 1 || parsedQty > 99) {
+          return {
+            kind: "error",
+            error: makeInputError({
+              lineNumber,
+              raw,
+              original: originalId,
+              normalizedId,
+              message: "Quantity must be a whole number from 1 through 99."
+            })
+          };
+        }
+        quantity = parsedQty;
+      } else {
+        const parsedCondition = parseConditionToken(tokens[0]);
+        if (parsedCondition) {
+          condition = parsedCondition;
+        } else {
+          return {
+            kind: "error",
+            error: makeInputError({
+              lineNumber,
+              raw,
+              original: originalId,
+              normalizedId,
+              message: "Quantity must be a whole number from 1 through 99."
+            })
+          };
+        }
+      }
+    } else if (tokens.length === 2) {
+      if (!INTEGER_PATTERN.test(tokens[0])) {
+        return {
+          kind: "error",
+          error: makeInputError({
+            lineNumber,
+            raw,
+            original: originalId,
+            normalizedId,
+            message: "Quantity must be a whole number from 1 through 99."
+          })
+        };
+      }
+      const parsedQty = Number(tokens[0]);
+      if (!Number.isSafeInteger(parsedQty) || parsedQty < 1 || parsedQty > 99) {
+        return {
+          kind: "error",
+          error: makeInputError({
+            lineNumber,
+            raw,
+            original: originalId,
+            normalizedId,
+            message: "Quantity must be a whole number from 1 through 99."
+          })
+        };
+      }
+      quantity = parsedQty;
+      const parsedCondition = parseConditionToken(tokens[1]);
+      if (parsedCondition) {
+        condition = parsedCondition;
+      } else {
+        return {
+          kind: "error",
+          error: makeInputError({
+            lineNumber,
+            raw,
+            original: originalId,
+            normalizedId,
+            message: "Condition must be 'damaged' (1) or 'normal' (0)."
+          })
+        };
+      }
+    } else {
       return {
         kind: "error",
         error: makeInputError({
@@ -127,13 +212,17 @@
           raw,
           original: originalId,
           normalizedId,
-          message: "Quantity must be a whole number from 1 through 99."
+          message: "Unexpected extra tokens on line."
         })
       };
+    }
+    const request = { originalId, normalizedId, quantity, lineNumber };
+    if (condition) {
+      request.condition = condition;
     }
     return {
       kind: "request",
-      request: { originalId, normalizedId, quantity, lineNumber }
+      request
     };
   }
   function parseInput(input) {
@@ -152,22 +241,27 @@
         errors.push(parsed.error);
         return;
       }
-      const { originalId, normalizedId, quantity, lineNumber: sourceLine } = parsed.request;
-      const existing = requestsById.get(normalizedId);
+      const { originalId, normalizedId, quantity, condition, lineNumber: sourceLine } = parsed.request;
+      const key = `${normalizedId}:${condition ?? ""}`;
+      const existing = requestsById.get(key);
       if (existing) {
         existing.originalIds.push(originalId);
         existing.sourceLines.push(sourceLine);
         existing.requestedQuantity += quantity;
         return;
       }
-      requestsById.set(normalizedId, {
+      const item = {
         originalIds: [originalId],
         normalizedId,
         requestedQuantity: quantity,
         sourceLines: [sourceLine]
-      });
+      };
+      if (condition) {
+        item.condition = condition;
+      }
+      requestsById.set(key, item);
     });
-    for (const [normalizedId, request] of requestsById) {
+    for (const [key, request] of requestsById) {
       if (request.requestedQuantity <= 99) {
         continue;
       }
@@ -177,11 +271,11 @@
           lineNumbers: [...request.sourceLines],
           raw: request.originalIds.join(", "),
           original: request.originalIds[0],
-          normalizedId,
+          normalizedId: request.normalizedId,
           message: `Combined quantity for ${request.originalIds[0]} exceeds the maximum of 99.`
         })
       );
-      requestsById.delete(normalizedId);
+      requestsById.delete(key);
     }
     errors.sort((left, right) => left.lineNumber - right.lineNumber);
     const result = {
@@ -382,16 +476,11 @@
     if (!detailUrl) {
       return { product: null, error: requiredFieldError("detail URL") };
     }
-    if (String(kizu).trim() !== "0") {
-      return {
-        product: null,
-        error: {
-          code: "PRODUCT_DAMAGED",
-          reason: "non-normal condition",
-          field: "cart_kizu"
-        }
-      };
+    const kizuStr = String(kizu).trim();
+    if (!/^\d+$/u.test(kizuStr)) {
+      return { product: null, error: requiredFieldError("cart_kizu") };
     }
+    const condition = kizuStr === "0" ? "normal" : "damaged";
     const soldOut = containsSoldOut(element) || active === 0 || limit === 0;
     const stock = Math.min(active, limit);
     const product = {
@@ -401,7 +490,8 @@
       gid: String(gid),
       ver: String(ver),
       cid: String(cid),
-      kizu: "0",
+      kizu: kizuStr,
+      condition,
       stock,
       limit,
       priceYen,
@@ -619,10 +709,12 @@
     const validQuantity = isValidQuantity(rawQuantity);
     const requestedQuantity = validQuantity ? Number(rawQuantity) : Number(rawQuantity) || 0;
     const originals = value && typeof value === "object" && Array.isArray(value.originalIds) ? value.originalIds.map((id) => String(id)) : printedId ? [printedId] : [];
+    const condition = value && typeof value === "object" && typeof value.condition === "string" ? value.condition : null;
     return {
       originalId: printedId || originals[0] || String(value?.normalizedId ?? ""),
       originalIds: originals,
       normalizedId,
+      ...condition ? { condition } : {},
       requestedQuantity,
       sourceLines: sourceLines(value),
       inputIndex: index,
@@ -657,8 +749,9 @@
         invalidWithoutId.push(request);
         return;
       }
-      const existing = byId.get(request.normalizedId);
-      byId.set(request.normalizedId, mergeRequest(existing, request));
+      const key = `${request.normalizedId}:${request.condition ?? ""}`;
+      const existing = byId.get(key);
+      byId.set(key, mergeRequest(existing, request));
     });
     return [...byId.values(), ...invalidWithoutId];
   }
@@ -859,60 +952,150 @@
       priceYen: null,
       availableStock: 0,
       plannedQuantity: 0,
-      selected: false
+      selected: false,
+      condition: request.condition ?? null
     };
   }
-  function makeRow(request, candidates) {
-    if (request.invalid) return makeInvalidRow(request);
-    const exact = candidates ?? [];
-    if (exact.length === 0) {
-      return {
-        ...request,
-        status: "missing",
-        reason: "PRODUCT_MISSING",
-        canonicalPrintedId: null,
-        product: null,
-        name: "",
-        priceYen: null,
-        availableStock: 0,
-        plannedQuantity: 0,
-        selected: false,
-        candidates: []
-      };
-    }
-    if (exact.length > 1) {
-      return {
-        ...request,
-        status: "ambiguous",
-        reason: "PRODUCT_AMBIGUOUS",
-        canonicalPrintedId: null,
-        product: null,
-        name: "",
-        priceYen: null,
-        availableStock: 0,
-        plannedQuantity: 0,
-        selected: false,
-        candidates: exact
-      };
-    }
-    const product = exact[0];
-    const numbers = numbersForProduct(product);
-    const soldOut = Boolean(product.soldOut) || numbers.stock <= 0;
-    const plannedQuantity = soldOut ? 0 : Math.min(request.requestedQuantity, numbers.stock);
-    const status = soldOut ? "sold-out" : plannedQuantity < request.requestedQuantity ? "partial" : "ready";
+  function makeMissingRow(request, reason = "PRODUCT_MISSING") {
+    return {
+      ...request,
+      status: "missing",
+      reason,
+      canonicalPrintedId: null,
+      product: null,
+      name: "",
+      priceYen: null,
+      availableStock: 0,
+      plannedQuantity: 0,
+      selected: false,
+      candidates: [],
+      condition: request.condition ?? null
+    };
+  }
+  function makeAmbiguousRow(request, candidates) {
+    return {
+      ...request,
+      status: "ambiguous",
+      reason: "PRODUCT_AMBIGUOUS",
+      canonicalPrintedId: null,
+      product: null,
+      name: "",
+      priceYen: null,
+      availableStock: 0,
+      plannedQuantity: 0,
+      selected: false,
+      candidates,
+      condition: request.condition ?? null
+    };
+  }
+  function buildRow(request, product, plannedQuantity, stock, statusOverride = null) {
+    const soldOut = Boolean(product.soldOut) || stock <= 0;
+    const status = statusOverride ? statusOverride : soldOut ? "sold-out" : plannedQuantity < request.requestedQuantity ? "partial" : "ready";
     return {
       ...request,
       status,
       reason: status === "ready" ? null : status === "partial" ? "PRODUCT_PARTIAL_STOCK" : "PRODUCT_SOLD_OUT",
       canonicalPrintedId: product.printedId,
+      condition: product.condition || (product.kizu === "0" ? "normal" : "damaged"),
+      kizu: product.kizu,
       product,
       name: product.name ?? "",
       priceYen: product.priceYen ?? null,
-      availableStock: numbers.stock,
+      availableStock: stock,
       plannedQuantity,
-      selected: status === "ready" || status === "partial",
-      candidates: exact
+      selected: plannedQuantity > 0,
+      candidates: [product]
     };
+  }
+  function makeSingleRow(request, product, requestedQuantity) {
+    const numbers = numbersForProduct(product);
+    const soldOut = Boolean(product.soldOut) || numbers.stock <= 0;
+    const plannedQuantity = soldOut ? 0 : Math.min(requestedQuantity, numbers.stock);
+    const status = soldOut ? "sold-out" : plannedQuantity < requestedQuantity ? "partial" : "ready";
+    return buildRow(request, product, plannedQuantity, numbers.stock, status);
+  }
+  function makeRows(request, candidates, options = {}) {
+    if (request.invalid) return [makeInvalidRow(request)];
+    const exact = candidates ?? [];
+    if (exact.length === 0) {
+      return [makeMissingRow(request)];
+    }
+    const normal = exact.filter((c) => String(c.kizu).trim() === "0");
+    const damaged = exact.filter((c) => String(c.kizu).trim() !== "0");
+    const preference = options.conditionPreference || "prefer-damaged";
+    const reqCond = request.condition;
+    if (reqCond === "normal") {
+      if (normal.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
+      if (normal.length > 1) return [makeAmbiguousRow(request, normal)];
+      const normalRow = makeSingleRow(request, normal[0], request.requestedQuantity);
+      if (damaged.length === 1) {
+        const damagedStock = numbersForProduct(damaged[0]).stock;
+        const damagedRow = buildRow(request, damaged[0], 0, damagedStock);
+        damagedRow.selected = false;
+        return [normalRow, damagedRow];
+      }
+      return [normalRow];
+    }
+    if (reqCond === "damaged") {
+      if (damaged.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
+      if (damaged.length > 1) return [makeAmbiguousRow(request, damaged)];
+      const damagedRow = makeSingleRow(request, damaged[0], request.requestedQuantity);
+      if (normal.length === 1) {
+        const normalStock = numbersForProduct(normal[0]).stock;
+        const normalRow = buildRow(request, normal[0], 0, normalStock);
+        normalRow.selected = false;
+        return [damagedRow, normalRow];
+      }
+      return [damagedRow];
+    }
+    if (preference === "normal-only") {
+      if (normal.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
+      if (normal.length > 1) return [makeAmbiguousRow(request, normal)];
+      return [makeSingleRow(request, normal[0], request.requestedQuantity)];
+    }
+    if (preference === "damaged-only") {
+      if (damaged.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
+      if (damaged.length > 1) return [makeAmbiguousRow(request, damaged)];
+      return [makeSingleRow(request, damaged[0], request.requestedQuantity)];
+    }
+    if (normal.length > 1 || damaged.length > 1) {
+      return [makeAmbiguousRow(request, exact)];
+    }
+    if (normal.length === 1 && damaged.length === 0) {
+      return [makeSingleRow(request, normal[0], request.requestedQuantity)];
+    }
+    if (damaged.length === 1 && normal.length === 0) {
+      return [makeSingleRow(request, damaged[0], request.requestedQuantity)];
+    }
+    if (normal.length === 1 && damaged.length === 1) {
+      const totalRequested = request.requestedQuantity;
+      const normalStock = numbersForProduct(normal[0]).stock;
+      const damagedStock = numbersForProduct(damaged[0]).stock;
+      if (preference === "prefer-damaged") {
+        const damagedPlanned = Math.min(totalRequested, damagedStock);
+        const normalPlanned = Math.min(Math.max(0, totalRequested - damagedPlanned), normalStock);
+        const totalAllocated = damagedPlanned + normalPlanned;
+        const damagedStatus = damagedStock <= 0 ? "sold-out" : totalAllocated < totalRequested ? "partial" : "ready";
+        const normalStatus = normalStock <= 0 ? "sold-out" : totalAllocated < totalRequested ? "partial" : "ready";
+        const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
+        damagedRow.selected = damagedPlanned > 0;
+        const normalRow = buildRow(request, normal[0], normalPlanned, normalStock, normalStatus);
+        normalRow.selected = normalPlanned > 0;
+        return [damagedRow, normalRow];
+      } else {
+        const normalPlanned = Math.min(totalRequested, normalStock);
+        const damagedPlanned = Math.min(Math.max(0, totalRequested - normalPlanned), damagedStock);
+        const totalAllocated = normalPlanned + damagedPlanned;
+        const normalStatus = normalStock <= 0 ? "sold-out" : totalAllocated < totalRequested ? "partial" : "ready";
+        const damagedStatus = damagedStock <= 0 ? "sold-out" : totalAllocated < totalRequested ? "partial" : "ready";
+        const normalRow = buildRow(request, normal[0], normalPlanned, normalStock, normalStatus);
+        normalRow.selected = normalPlanned > 0;
+        const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
+        damagedRow.selected = damagedPlanned > 0;
+        return [normalRow, damagedRow];
+      }
+    }
+    return [makeMissingRow(request)];
   }
   async function delayBetweenQueries(options, queryNumber) {
     const delay = Number.isFinite(options.delayMs) ? Math.max(0, options.delayMs) : 250;
@@ -924,7 +1107,7 @@
   function assertStructure(parsed, query, expectedIds) {
     if (!parsed?.structureError) return;
     const matching = matchingProducts(parsed.products, expectedIds);
-    const allCandidatesInvalid = parsed.cardProductCount > 0 && parsed.products.length === 0 && (parsed.rejected ?? []).some((error) => error?.code !== "PRODUCT_DAMAGED");
+    const allCandidatesInvalid = parsed.cardProductCount > 0 && parsed.products.length === 0;
     const noCardMarkup = parsed.cardProductCount === 0 && !parsed.explicitEmpty;
     if (allCandidatesInvalid || noCardMarkup && matching.size === 0) {
       throw new LookupError(
@@ -994,7 +1177,9 @@
         productCount: parsed.products.length
       });
     }
-    const rows = normalizedRequests.map((request) => makeRow(request, candidatesById.get(request.normalizedId)));
+    const rows = normalizedRequests.flatMap(
+      (request) => makeRows(request, candidatesById.get(request.normalizedId), options)
+    );
     return {
       rows,
       items: rows,
@@ -1369,10 +1554,10 @@
         );
       }
     }
-    if (product.kizu != null && String(product.kizu) !== "0") {
+    if (product.kizu != null && !/^\d+$/u.test(String(product.kizu).trim())) {
       throw new CartError(
         CART_ERROR_CODES.CART_REJECTED,
-        "Only normal-condition products can be added by this tool."
+        "The resolved product has an invalid condition code."
       );
     }
   }
@@ -1443,7 +1628,7 @@
       mode: "add",
       type: "sell",
       counter: String(quantity),
-      kizu: "0",
+      kizu: String(product.kizu ?? "0"),
       time: timestampValue(config.now)
     });
     const request = {
@@ -1562,6 +1747,11 @@ tr.unavailable { color: #667085; background: #f8fafc; }
 .result-group { padding: 12px; border: 1px solid #d8dee8; border-radius: 8px; }
 .result-group ul { margin: 8px 0 0; padding-left: 20px; }
 a { color: #175cd3; }
+.badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.badge-normal { background: #ecfdf3; color: #027a48; border: 1px solid #abefc6; }
+.badge-damaged { background: #fffaeb; color: #b54708; border: 1px solid #fedf89; }
+.qty-input { width: 56px; padding: 3px 5px; border: 1px solid #98a2b3; border-radius: 5px; text-align: right; font-size: 13px; }
+.select-pref { width: 100%; padding: 8px 10px; border: 1px solid #98a2b3; border-radius: 7px; font-size: 14px; background: #fff; }
 @media (max-width: 600px) { .backdrop { padding: 0; place-items: stretch; } .panel { width: 100%; max-height: 100vh; border-radius: 0; } .body { padding: 14px; } .launcher { right: 10px; bottom: 10px; } }
 `;
 
@@ -1580,10 +1770,11 @@ a { color: #175cd3; }
     return node;
   }
   function statusReason(row) {
+    const cond = row.condition === "damaged" ? "damaged" : "normal";
     const messages = {
       ready: "Ready",
       partial: `Requested ${row.requestedQuantity}; adding ${row.plannedQuantity}`,
-      "sold-out": "Exact normal-condition card is sold out",
+      "sold-out": `Card is sold out in ${cond} condition`,
       missing: "No exact card found",
       ambiguous: "Multiple exact products found; skipped",
       invalid: row.reason || "Invalid input"
@@ -1646,11 +1837,20 @@ a { color: #175cd3; }
         }
       }
     });
-    function showInput(saved = "") {
+    function showInput(saved = "", savedPref = "prefer-damaged") {
       adding = false;
       cancelRequested = false;
-      const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2" });
+      const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2 damaged" });
       input.value = saved;
+      const prefSelect = el(
+        "select",
+        { id: "yyt-condition-preference", className: "select-pref" },
+        el("option", { value: "prefer-damaged", text: "Prefer damaged, fall back to normal" }),
+        el("option", { value: "prefer-normal", text: "Prefer normal, fall back to damaged" }),
+        el("option", { value: "normal-only", text: "Normal condition only" }),
+        el("option", { value: "damaged-only", text: "Damaged condition only" })
+      );
+      prefSelect.value = savedPref;
       const errorBox = el("div", { className: "error", hidden: true });
       const resolveButton = el("button", { className: "primary", type: "button", text: "Resolve cards" });
       resolveButton.addEventListener("click", async () => {
@@ -1663,104 +1863,174 @@ a { color: #175cd3; }
           return;
         }
         if (!parsed.requests.length) {
+          const errList = parsed.invalid || parsed.errors || [];
           errorBox.hidden = false;
-          errorBox.textContent = parsed.invalid.length ? parsed.invalid.map((x) => `Line ${x.lineNumber}: ${x.reason}`).join("\n") : "Enter at least one card ID.";
+          errorBox.textContent = errList.length ? errList.map((x) => `Line ${x.lineNumber}: ${x.reason || x.message}`).join("\n") : "Enter at least one card ID.";
           return;
         }
-        await showResolving(parsed, input.value);
+        await showResolving(parsed, input.value, prefSelect.value);
       });
       setView(
         el("p", { className: "warning", text: "Quantities below will be added to anything already in your cart." }),
-        el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Normal-condition cards only. Lines beginning with # are ignored." }),
+        el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged' (or 1) for damaged copies. Lines beginning with # are ignored." }),
+        el("label", { for: "yyt-condition-preference", text: "Condition preference" }, prefSelect),
         el("label", { for: "yyt-card-list", text: "Card IDs and quantities" }, input),
         errorBox,
         el("div", { className: "actions" }, resolveButton)
       );
       input.focus();
     }
-    async function showResolving(parsed, source) {
+    async function showResolving(parsed, source, conditionPreference = "prefer-damaged") {
       lookupController = new AbortController();
-      const message = el("p", { text: `Resolving ${parsed.requests.length} distinct card IDs\u2026` });
+      const message = el("p", { text: `Resolving ${parsed.requests.length} distinct card requests\u2026` });
       const cancel = el("button", { type: "button", text: "Cancel", onClick: () => {
         lookupController.abort();
-        showInput(source);
+        showInput(source, conditionPreference);
       } });
       setView(el("h3", { text: "Resolving" }), message, el("progress", { className: "progress" }), el("div", { className: "actions" }, cancel));
       try {
-        const rows = await resolve(parsed.requests, { signal: lookupController.signal, onProgress: (text) => {
-          message.textContent = text;
-        } });
-        const invalidRows = parsed.invalid.map((item) => ({ ...item, status: "invalid", requestedId: item.original || "\u2014", requestedQuantity: 0, plannedQuantity: 0 }));
-        showReview([...rows, ...invalidRows], source);
+        const rows = await resolve(parsed.requests, {
+          signal: lookupController.signal,
+          conditionPreference,
+          onProgress: (text) => {
+            message.textContent = text;
+          }
+        });
+        const invalidRows = (parsed.invalid || parsed.errors || []).map((item) => ({
+          ...item,
+          status: "invalid",
+          requestedId: item.original || "\u2014",
+          requestedQuantity: 0,
+          plannedQuantity: 0
+        }));
+        showReview([...rows, ...invalidRows], source, conditionPreference);
       } catch (error) {
         if (error.name === "AbortError" || error.cause?.name === "AbortError") return;
         setView(
           el("h3", { text: "Lookup stopped" }),
           el("div", { className: "error", text: error.message || "Unable to resolve cards." }),
-          el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source) }))
+          el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source, conditionPreference) }))
         );
       }
     }
-    function showReview(rows, source) {
-      const selectable = rows.filter((r) => r.status === "ready" || r.status === "partial");
-      for (const row of rows) row.selected = selectable.includes(row);
+    function showReview(rows, source, conditionPreference = "prefer-damaged") {
+      const isRowSelectable = (r) => (r.status === "ready" || r.status === "partial") && (r.stock ?? r.availableStock ?? 0) > 0;
+      for (const row of rows) {
+        if (typeof row.selected !== "boolean") {
+          row.selected = isRowSelectable(row) && row.plannedQuantity > 0;
+        }
+      }
       const tbody = el("tbody");
       const countText = el("strong");
       const totalText = el("span");
       const submit = el("button", { className: "primary", type: "button" });
       const update = () => {
-        const chosen = selectable.filter((r) => r.selected);
-        const cards = chosen.reduce((n, r) => n + r.plannedQuantity, 0);
+        const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
+        const totalCards = chosen.reduce((n, r) => n + r.plannedQuantity, 0);
+        const normalCards = chosen.filter((r) => r.condition !== "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
+        const damagedCards = chosen.filter((r) => r.condition === "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
         const total = chosen.reduce((n, r) => n + (r.priceYen || 0) * r.plannedQuantity, 0);
-        countText.textContent = `${chosen.length} distinct products / ${cards} cards`;
+        let desc = `${chosen.length} product${chosen.length === 1 ? "" : "s"} / ${totalCards} card${totalCards === 1 ? "" : "s"}`;
+        if (damagedCards > 0 && normalCards > 0) {
+          desc += ` (${normalCards} normal, ${damagedCards} damaged)`;
+        } else if (damagedCards > 0) {
+          desc += ` (all ${damagedCards} damaged)`;
+        }
+        countText.textContent = desc;
         totalText.textContent = `Estimated selected total: ${yen.format(total)}`;
-        submit.textContent = `Add ${cards} cards from ${chosen.length} products`;
+        submit.textContent = `Add ${totalCards} cards from ${chosen.length} products`;
         submit.disabled = !chosen.length;
       };
       for (const row of rows) {
-        const checkbox = el("input", { type: "checkbox", "aria-label": `Select ${row.requestedId || row.printedId || "card"}` });
-        checkbox.checked = row.selected;
-        checkbox.disabled = !selectable.includes(row);
-        checkbox.addEventListener("change", () => {
-          row.selected = checkbox.checked;
-          update();
+        const stock = row.stock ?? row.availableStock ?? 0;
+        const selectable = isRowSelectable(row);
+        const checkbox = el("input", {
+          type: "checkbox",
+          "aria-label": `Select ${row.requestedId || row.printedId || "card"}`
         });
-        tbody.append(el(
-          "tr",
-          { className: row.status === "partial" ? "partial" : selectable.includes(row) ? "" : "unavailable" },
-          el("td", {}, checkbox),
-          el("td", { text: row.requestedId || row.originalIds?.[0] || "\u2014" }),
-          el("td", { text: row.printedId || "\u2014" }),
-          el("td", { text: row.name || "\u2014" }),
-          el("td", { className: "num", text: Number.isFinite(row.priceYen) ? yen.format(row.priceYen) : "\u2014" }),
-          el("td", { className: "num", text: String(row.requestedQuantity || "\u2014") }),
-          el("td", { className: "num", text: Number.isFinite(row.stock) ? String(row.stock) : "\u2014" }),
-          el("td", { className: "num", text: row.plannedQuantity ? String(row.plannedQuantity) : "\u2014" }),
-          el("td", { className: "status", text: statusReason(row) })
-        ));
+        checkbox.checked = Boolean(row.selected && row.plannedQuantity > 0);
+        checkbox.disabled = !selectable;
+        let addingCell;
+        if (selectable) {
+          const qtyInput = el("input", {
+            type: "number",
+            className: "qty-input",
+            min: 0,
+            max: stock,
+            value: String(row.plannedQuantity ?? 0),
+            "aria-label": `Quantity for ${row.printedId || row.requestedId}`
+          });
+          qtyInput.addEventListener("input", () => {
+            let val = parseInt(qtyInput.value, 10);
+            if (isNaN(val) || val < 0) val = 0;
+            if (val > stock) val = stock;
+            row.plannedQuantity = val;
+            row.selected = val > 0;
+            checkbox.checked = row.selected;
+            update();
+          });
+          checkbox.addEventListener("change", () => {
+            row.selected = checkbox.checked;
+            if (row.selected && row.plannedQuantity === 0) {
+              row.plannedQuantity = Math.min(row.requestedQuantity || 1, stock);
+              qtyInput.value = String(row.plannedQuantity);
+            } else if (!row.selected) {
+              row.plannedQuantity = 0;
+              qtyInput.value = "0";
+            }
+            update();
+          });
+          addingCell = el("td", { className: "num" }, qtyInput);
+        } else {
+          checkbox.addEventListener("change", () => {
+            row.selected = checkbox.checked;
+            update();
+          });
+          addingCell = el("td", { className: "num", text: "0" });
+        }
+        const condBadge = row.condition ? el("span", {
+          className: `badge badge-${row.condition}`,
+          text: row.condition === "damaged" ? "Damaged" : "Normal"
+        }) : el("span", { text: "\u2014" });
+        tbody.append(
+          el(
+            "tr",
+            { className: row.status === "partial" ? "partial" : selectable ? "" : "unavailable" },
+            el("td", {}, checkbox),
+            el("td", { text: row.requestedId || row.originalIds?.[0] || "\u2014" }),
+            el("td", { text: row.printedId || "\u2014" }),
+            el("td", {}, condBadge),
+            el("td", { text: row.name || "\u2014" }),
+            el("td", { className: "num", text: Number.isFinite(row.priceYen) ? yen.format(row.priceYen) : "\u2014" }),
+            el("td", { className: "num", text: String(row.requestedQuantity || "\u2014") }),
+            el("td", { className: "num", text: Number.isFinite(stock) ? String(stock) : "\u2014" }),
+            addingCell,
+            el("td", { className: "status", text: statusReason(row) })
+          )
+        );
       }
       const table = el(
         "table",
         {},
-        el("thead", {}, el("tr", {}, ...["Use", "Requested ID", "YYT ID", "Name", "Price", "Requested", "Stock", "Adding", "Status"].map((x) => el("th", { text: x })))),
+        el("thead", {}, el("tr", {}, ...["Use", "Requested ID", "YYT ID", "Cond.", "Name", "Price", "Requested", "Stock", "Adding", "Status"].map((x) => el("th", { text: x })))),
         tbody
       );
       submit.addEventListener("click", async () => {
         if (adding) return;
-        const chosen = selectable.filter((r) => r.selected);
-        if (chosen.length) await runBatch(rows, chosen);
+        const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
+        if (chosen.length) await runBatch(rows, chosen, source, conditionPreference);
       });
       update();
       setView(
-        el("h3", { text: "Review exact matches" }),
-        el("p", { className: "warning", text: "Quantities will be added to the existing cart. Search data is an estimate and does not reserve inventory." }),
+        el("h3", { text: "Review matches & allocate quantities" }),
+        el("p", { className: "warning", text: "Quantities will be added to the existing cart. Adjust Normal vs Damaged quantities as desired." }),
         el("div", { className: "table-wrap" }, table),
         el("div", { className: "summary" }, countText, totalText),
-        el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source) }), submit)
+        el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source, conditionPreference) }), submit)
       );
       submit.focus();
     }
-    async function runBatch(allRows, chosen) {
+    async function runBatch(allRows, chosen, source, conditionPreference) {
       adding = true;
       cancelRequested = false;
       addController = new AbortController();
@@ -1785,7 +2055,7 @@ a { color: #175cd3; }
         token = await getCsrfToken2({ signal: addController.signal });
       } catch (error) {
         adding = false;
-        showResults(allRows, chosen, [{ outcome: "failed", message: error.message || "Could not obtain a CSRF token." }]);
+        showResults(allRows, chosen, [{ outcome: "failed", message: error.message || "Could not obtain a CSRF token." }], source, conditionPreference);
         return;
       }
       for (let index = 0; index < chosen.length; index += 1) {
@@ -1810,9 +2080,9 @@ a { color: #175cd3; }
         if (result.outcome === "success" && index < chosen.length - 1) await new Promise((resolveDelay) => setTimeout(resolveDelay, mutationDelayMs));
       }
       adding = false;
-      showResults(allRows, chosen, results);
+      showResults(allRows, chosen, results, source, conditionPreference);
     }
-    function showResults(allRows, chosen, results) {
+    function showResults(allRows, chosen, results, source, conditionPreference) {
       const selected = new Set(chosen);
       const skippedReview = allRows.filter((r) => !selected.has(r)).map((row) => ({ row, outcome: "skipped", message: statusReason(row) }));
       const combined = [...results, ...skippedReview];
@@ -1826,11 +2096,17 @@ a { color: #175cd3; }
         const matches = combined.filter((r) => r.outcome === key);
         if (!matches.length) return null;
         const list = el("ul");
-        for (const result of matches) list.append(el("li", { text: `${result.row?.printedId || result.row?.requestedId || "Batch"}: ${result.message || key}` }));
+        for (const result of matches) {
+          const cond = result.row?.condition ? ` [${result.row.condition}]` : "";
+          list.append(el("li", { text: `${result.row?.printedId || result.row?.requestedId || "Batch"}${cond}: ${result.message || key}` }));
+        }
         return el("section", { className: "result-group" }, el("h3", { text: `${label} (${matches.length})` }), list);
       }).filter(Boolean);
       const hasUnknown = combined.some((r) => r.outcome === "unknown");
-      const report = groups.flatMap(([key, label]) => combined.filter((r) => r.outcome === key).map((r) => `${label}: ${r.row?.printedId || r.row?.requestedId || "Batch"} \u2014 ${r.message || key}`)).join("\n");
+      const report = groups.flatMap(([key, label]) => combined.filter((r) => r.outcome === key).map((r) => {
+        const cond = r.row?.condition ? ` [${r.row.condition}]` : "";
+        return `${label}: ${r.row?.printedId || r.row?.requestedId || "Batch"}${cond} \u2014 ${r.message || key}`;
+      })).join("\n");
       const copy = el("button", { type: "button", text: "Copy report", onClick: async (event) => {
         try {
           await navigator.clipboard.writeText(report);
@@ -1868,7 +2144,8 @@ a { color: #175cd3; }
       gid: product?.gid,
       ver: product?.ver,
       cid: product?.cid,
-      kizu: product?.kizu,
+      kizu: row.kizu ?? product?.kizu,
+      condition: row.condition ?? product?.condition ?? (product?.kizu === "0" ? "normal" : "damaged"),
       limit: product?.limit
     };
   }
@@ -1877,7 +2154,8 @@ a { color: #175cd3; }
     async resolve(requests, options = {}) {
       const resolved = await lookupProducts(requests, {
         signal: options.signal,
-        delayMs: 250
+        delayMs: 250,
+        conditionPreference: options.conditionPreference
       });
       return resolved.rows.map(uiRow);
     },

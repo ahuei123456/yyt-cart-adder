@@ -159,3 +159,54 @@ test("unusual request objects are sent through exact fallback", () => {
   assert.deepEqual(grouped.groups, []);
   assert.deepEqual(grouped.exactFallback, [request]);
 });
+
+test("parses damaged condition tokens in various delimiters", () => {
+  const result = parseInput([
+    "Kka/W102-005SEC 1 damaged",
+    "Kka/W102-006SP,2,damaged",
+    "Kka/W102-007RR 3 1",
+    "Kka/W102-008R 4,damaged",
+    "Kka/W102-009R damaged",
+    "Kka/W102-010R 2 normal",
+    "Kka/W102-011R 1 0",
+  ].join("\n"));
+
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.requests.length, 7);
+  assert.deepEqual(result.requests[0], {
+    originalIds: ["Kka/W102-005SEC"],
+    normalizedId: "kka/w102-005sec",
+    requestedQuantity: 1,
+    sourceLines: [1],
+    condition: "damaged",
+  });
+  assert.equal(result.requests[1].condition, "damaged");
+  assert.equal(result.requests[1].requestedQuantity, 2);
+  assert.equal(result.requests[2].condition, "damaged");
+  assert.equal(result.requests[2].requestedQuantity, 3);
+  assert.equal(result.requests[3].condition, "damaged");
+  assert.equal(result.requests[3].requestedQuantity, 4);
+  assert.equal(result.requests[4].condition, "damaged");
+  assert.equal(result.requests[4].requestedQuantity, 1);
+  assert.equal(result.requests[5].condition, "normal");
+  assert.equal(result.requests[5].requestedQuantity, 2);
+  assert.equal(result.requests[6].condition, "normal");
+  assert.equal(result.requests[6].requestedQuantity, 1);
+});
+
+test("aggregates duplicate cards with same condition and keeps distinct conditions separate", () => {
+  const result = parseInput([
+    "Kka/W102-005SEC 1 damaged",
+    "kka/w102-005sec 2 damaged",
+    "Kka/W102-005SEC 3 normal",
+  ].join("\n"));
+
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.requests.length, 2);
+  const damaged = result.requests.find((r) => r.condition === "damaged");
+  const normal = result.requests.find((r) => r.condition === "normal");
+  assert.equal(damaged.requestedQuantity, 3);
+  assert.deepEqual(damaged.sourceLines, [1, 2]);
+  assert.equal(normal.requestedQuantity, 3);
+  assert.deepEqual(normal.sourceLines, [3]);
+});

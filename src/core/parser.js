@@ -285,19 +285,11 @@ function parseProductElementDetailed(element) {
     return { product: null, error: requiredFieldError("detail URL") };
   }
 
-  // Damaged inventory is deliberately not represented as a product in this
-  // MVP.  Returning it as a normal candidate would make exact matching look
-  // successful and could silently violate the condition policy.
-  if (String(kizu).trim() !== "0") {
-    return {
-      product: null,
-      error: {
-        code: "PRODUCT_DAMAGED",
-        reason: "non-normal condition",
-        field: "cart_kizu",
-      },
-    };
+  const kizuStr = String(kizu).trim();
+  if (!/^\d+$/u.test(kizuStr)) {
+    return { product: null, error: requiredFieldError("cart_kizu") };
   }
+  const condition = kizuStr === "0" ? "normal" : "damaged";
 
   const soldOut = containsSoldOut(element) || active === 0 || limit === 0;
   const stock = Math.min(active, limit);
@@ -309,7 +301,8 @@ function parseProductElementDetailed(element) {
     gid: String(gid),
     ver: String(ver),
     cid: String(cid),
-    kizu: "0",
+    kizu: kizuStr,
+    condition,
     stock,
     limit,
     priceYen,

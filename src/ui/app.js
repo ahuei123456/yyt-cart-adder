@@ -16,10 +16,11 @@ function el(tag, props = {}, ...children) {
 }
 
 function statusReason(row) {
+  const cond = row.condition === "damaged" ? "damaged" : "normal";
   const messages = {
     ready: "Ready",
     partial: `Requested ${row.requestedQuantity}; adding ${row.plannedQuantity}`,
-    "sold-out": "Exact normal-condition card is sold out",
+    "sold-out": `Card is sold out in ${cond} condition`,
     missing: "No exact card found",
     ambiguous: "Multiple exact products found; skipped",
     invalid: row.reason || "Invalid input",
@@ -77,11 +78,18 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     }
   });
 
-  function showInput(saved = "") {
+  function showInput(saved = "", savedPref = "prefer-damaged") {
     adding = false;
     cancelRequested = false;
-    const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2" });
+    const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2 damaged" });
     input.value = saved;
+    const prefSelect = el("select", { id: "yyt-condition-preference", className: "select-pref" },
+      el("option", { value: "prefer-damaged", text: "Prefer damaged, fall back to normal" }),
+      el("option", { value: "prefer-normal", text: "Prefer normal, fall back to damaged" }),
+      el("option", { value: "normal-only", text: "Normal condition only" }),
+      el("option", { value: "damaged-only", text: "Damaged condition only" }),
+    );
+    prefSelect.value = savedPref;
     const errorBox = el("div", { className: "error", hidden: true });
     const resolveButton = el("button", { className: "primary", type: "button", text: "Resolve cards" });
     resolveButton.addEventListener("click", async () => {
@@ -89,15 +97,17 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
       try { parsed = parse(input.value); }
       catch (error) { errorBox.hidden = false; errorBox.textContent = error.message || "Could not parse input."; return; }
       if (!parsed.requests.length) {
+        const errList = parsed.invalid || parsed.errors || [];
         errorBox.hidden = false;
-        errorBox.textContent = parsed.invalid.length ? parsed.invalid.map((x) => `Line ${x.lineNumber}: ${x.reason}`).join("\n") : "Enter at least one card ID.";
+        errorBox.textContent = errList.length ? errList.map((x) => `Line ${x.lineNumber}: ${x.reason || x.message}`).join("\n") : "Enter at least one card ID.";
         return;
       }
-      await showResolving(parsed, input.value);
+      await showResolving(parsed, input.value, prefSelect.value);
     });
     setView(
       el("p", { className: "warning", text: "Quantities below will be added to anything already in your cart." }),
-      el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Normal-condition cards only. Lines beginning with # are ignored." }),
+      el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged' (or 1) for damaged copies. Lines beginning with # are ignored." }),
+      el("label", { for: "yyt-condition-preference", text: "Condition preference" }, prefSelect),
       el("label", { for: "yyt-card-list", text: "Card IDs and quantities" }, input),
       errorBox,
       el("div", { className: "actions" }, resolveButton),
@@ -105,76 +115,154 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     input.focus();
   }
 
-  async function showResolving(parsed, source) {
+  async function showResolving(parsed, source, conditionPreference = "prefer-damaged") {
     lookupController = new AbortController();
-    const message = el("p", { text: `Resolving ${parsed.requests.length} distinct card IDs…` });
-    const cancel = el("button", { type: "button", text: "Cancel", onClick: () => { lookupController.abort(); showInput(source); } });
+    const message = el("p", { text: `Resolving ${parsed.requests.length} distinct card requests…` });
+    const cancel = el("button", { type: "button", text: "Cancel", onClick: () => { lookupController.abort(); showInput(source, conditionPreference); } });
     setView(el("h3", { text: "Resolving" }), message, el("progress", { className: "progress" }), el("div", { className: "actions" }, cancel));
     try {
-      const rows = await resolve(parsed.requests, { signal: lookupController.signal, onProgress: (text) => { message.textContent = text; } });
-      const invalidRows = parsed.invalid.map((item) => ({ ...item, status: "invalid", requestedId: item.original || "—", requestedQuantity: 0, plannedQuantity: 0 }));
-      showReview([...rows, ...invalidRows], source);
+      const rows = await resolve(parsed.requests, {
+        signal: lookupController.signal,
+        conditionPreference,
+        onProgress: (text) => { message.textContent = text; },
+      });
+      const invalidRows = (parsed.invalid || parsed.errors || []).map((item) => ({
+        ...item,
+        status: "invalid",
+        requestedId: item.original || "—",
+        requestedQuantity: 0,
+        plannedQuantity: 0,
+      }));
+      showReview([...rows, ...invalidRows], source, conditionPreference);
     } catch (error) {
       if (error.name === "AbortError" || error.cause?.name === "AbortError") return;
       setView(el("h3", { text: "Lookup stopped" }), el("div", { className: "error", text: error.message || "Unable to resolve cards." }),
-        el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source) })));
+        el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source, conditionPreference) })));
     }
   }
 
-  function showReview(rows, source) {
-    const selectable = rows.filter((r) => r.status === "ready" || r.status === "partial");
-    for (const row of rows) row.selected = selectable.includes(row);
+  function showReview(rows, source, conditionPreference = "prefer-damaged") {
+    const isRowSelectable = (r) => (r.status === "ready" || r.status === "partial") && (r.stock ?? r.availableStock ?? 0) > 0;
+    for (const row of rows) {
+      if (typeof row.selected !== "boolean") {
+        row.selected = isRowSelectable(row) && row.plannedQuantity > 0;
+      }
+    }
     const tbody = el("tbody");
     const countText = el("strong");
     const totalText = el("span");
     const submit = el("button", { className: "primary", type: "button" });
 
     const update = () => {
-      const chosen = selectable.filter((r) => r.selected);
-      const cards = chosen.reduce((n, r) => n + r.plannedQuantity, 0);
+      const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
+      const totalCards = chosen.reduce((n, r) => n + r.plannedQuantity, 0);
+      const normalCards = chosen.filter((r) => r.condition !== "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
+      const damagedCards = chosen.filter((r) => r.condition === "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
       const total = chosen.reduce((n, r) => n + (r.priceYen || 0) * r.plannedQuantity, 0);
-      countText.textContent = `${chosen.length} distinct products / ${cards} cards`;
+
+      let desc = `${chosen.length} product${chosen.length === 1 ? "" : "s"} / ${totalCards} card${totalCards === 1 ? "" : "s"}`;
+      if (damagedCards > 0 && normalCards > 0) {
+        desc += ` (${normalCards} normal, ${damagedCards} damaged)`;
+      } else if (damagedCards > 0) {
+        desc += ` (all ${damagedCards} damaged)`;
+      }
+      countText.textContent = desc;
       totalText.textContent = `Estimated selected total: ${yen.format(total)}`;
-      submit.textContent = `Add ${cards} cards from ${chosen.length} products`;
+      submit.textContent = `Add ${totalCards} cards from ${chosen.length} products`;
       submit.disabled = !chosen.length;
     };
 
     for (const row of rows) {
-      const checkbox = el("input", { type: "checkbox", "aria-label": `Select ${row.requestedId || row.printedId || "card"}` });
-      checkbox.checked = row.selected;
-      checkbox.disabled = !selectable.includes(row);
-      checkbox.addEventListener("change", () => { row.selected = checkbox.checked; update(); });
-      tbody.append(el("tr", { className: row.status === "partial" ? "partial" : selectable.includes(row) ? "" : "unavailable" },
-        el("td", {}, checkbox),
-        el("td", { text: row.requestedId || row.originalIds?.[0] || "—" }),
-        el("td", { text: row.printedId || "—" }),
-        el("td", { text: row.name || "—" }),
-        el("td", { className: "num", text: Number.isFinite(row.priceYen) ? yen.format(row.priceYen) : "—" }),
-        el("td", { className: "num", text: String(row.requestedQuantity || "—") }),
-        el("td", { className: "num", text: Number.isFinite(row.stock) ? String(row.stock) : "—" }),
-        el("td", { className: "num", text: row.plannedQuantity ? String(row.plannedQuantity) : "—" }),
-        el("td", { className: "status", text: statusReason(row) }),
-      ));
+      const stock = row.stock ?? row.availableStock ?? 0;
+      const selectable = isRowSelectable(row);
+      const checkbox = el("input", {
+        type: "checkbox",
+        "aria-label": `Select ${row.requestedId || row.printedId || "card"}`,
+      });
+      checkbox.checked = Boolean(row.selected && row.plannedQuantity > 0);
+      checkbox.disabled = !selectable;
+
+      let addingCell;
+      if (selectable) {
+        const qtyInput = el("input", {
+          type: "number",
+          className: "qty-input",
+          min: 0,
+          max: stock,
+          value: String(row.plannedQuantity ?? 0),
+          "aria-label": `Quantity for ${row.printedId || row.requestedId}`,
+        });
+        qtyInput.addEventListener("input", () => {
+          let val = parseInt(qtyInput.value, 10);
+          if (isNaN(val) || val < 0) val = 0;
+          if (val > stock) val = stock;
+          row.plannedQuantity = val;
+          row.selected = val > 0;
+          checkbox.checked = row.selected;
+          update();
+        });
+        checkbox.addEventListener("change", () => {
+          row.selected = checkbox.checked;
+          if (row.selected && row.plannedQuantity === 0) {
+            row.plannedQuantity = Math.min(row.requestedQuantity || 1, stock);
+            qtyInput.value = String(row.plannedQuantity);
+          } else if (!row.selected) {
+            row.plannedQuantity = 0;
+            qtyInput.value = "0";
+          }
+          update();
+        });
+        addingCell = el("td", { className: "num" }, qtyInput);
+      } else {
+        checkbox.addEventListener("change", () => {
+          row.selected = checkbox.checked;
+          update();
+        });
+        addingCell = el("td", { className: "num", text: "0" });
+      }
+
+      const condBadge = row.condition
+        ? el("span", {
+            className: `badge badge-${row.condition}`,
+            text: row.condition === "damaged" ? "Damaged" : "Normal",
+          })
+        : el("span", { text: "—" });
+
+      tbody.append(
+        el("tr", { className: row.status === "partial" ? "partial" : selectable ? "" : "unavailable" },
+          el("td", {}, checkbox),
+          el("td", { text: row.requestedId || row.originalIds?.[0] || "—" }),
+          el("td", { text: row.printedId || "—" }),
+          el("td", {}, condBadge),
+          el("td", { text: row.name || "—" }),
+          el("td", { className: "num", text: Number.isFinite(row.priceYen) ? yen.format(row.priceYen) : "—" }),
+          el("td", { className: "num", text: String(row.requestedQuantity || "—") }),
+          el("td", { className: "num", text: Number.isFinite(stock) ? String(stock) : "—" }),
+          addingCell,
+          el("td", { className: "status", text: statusReason(row) }),
+        )
+      );
     }
+
     const table = el("table", {},
-      el("thead", {}, el("tr", {}, ...["Use", "Requested ID", "YYT ID", "Name", "Price", "Requested", "Stock", "Adding", "Status"].map((x) => el("th", { text: x })))), tbody);
+      el("thead", {}, el("tr", {}, ...["Use", "Requested ID", "YYT ID", "Cond.", "Name", "Price", "Requested", "Stock", "Adding", "Status"].map((x) => el("th", { text: x })))), tbody);
     submit.addEventListener("click", async () => {
       if (adding) return;
-      const chosen = selectable.filter((r) => r.selected);
-      if (chosen.length) await runBatch(rows, chosen);
+      const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
+      if (chosen.length) await runBatch(rows, chosen, source, conditionPreference);
     });
     update();
     setView(
-      el("h3", { text: "Review exact matches" }),
-      el("p", { className: "warning", text: "Quantities will be added to the existing cart. Search data is an estimate and does not reserve inventory." }),
+      el("h3", { text: "Review matches & allocate quantities" }),
+      el("p", { className: "warning", text: "Quantities will be added to the existing cart. Adjust Normal vs Damaged quantities as desired." }),
       el("div", { className: "table-wrap" }, table),
       el("div", { className: "summary" }, countText, totalText),
-      el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source) }), submit),
+      el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source, conditionPreference) }), submit),
     );
     submit.focus();
   }
 
-  async function runBatch(allRows, chosen) {
+  async function runBatch(allRows, chosen, source, conditionPreference) {
     adding = true;
     cancelRequested = false;
     addController = new AbortController();
@@ -190,7 +278,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     try { token = await getCsrfToken({ signal: addController.signal }); }
     catch (error) {
       adding = false;
-      showResults(allRows, chosen, [{ outcome: "failed", message: error.message || "Could not obtain a CSRF token." }]);
+      showResults(allRows, chosen, [{ outcome: "failed", message: error.message || "Could not obtain a CSRF token." }], source, conditionPreference);
       return;
     }
     for (let index = 0; index < chosen.length; index += 1) {
@@ -212,10 +300,10 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
       if (result.outcome === "success" && index < chosen.length - 1) await new Promise((resolveDelay) => setTimeout(resolveDelay, mutationDelayMs));
     }
     adding = false;
-    showResults(allRows, chosen, results);
+    showResults(allRows, chosen, results, source, conditionPreference);
   }
 
-  function showResults(allRows, chosen, results) {
+  function showResults(allRows, chosen, results, source, conditionPreference) {
     const selected = new Set(chosen);
     const skippedReview = allRows.filter((r) => !selected.has(r)).map((row) => ({ row, outcome: "skipped", message: statusReason(row) }));
     const combined = [...results, ...skippedReview];
@@ -226,11 +314,17 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
       const matches = combined.filter((r) => r.outcome === key);
       if (!matches.length) return null;
       const list = el("ul");
-      for (const result of matches) list.append(el("li", { text: `${result.row?.printedId || result.row?.requestedId || "Batch"}: ${result.message || key}` }));
+      for (const result of matches) {
+        const cond = result.row?.condition ? ` [${result.row.condition}]` : "";
+        list.append(el("li", { text: `${result.row?.printedId || result.row?.requestedId || "Batch"}${cond}: ${result.message || key}` }));
+      }
       return el("section", { className: "result-group" }, el("h3", { text: `${label} (${matches.length})` }), list);
     }).filter(Boolean);
     const hasUnknown = combined.some((r) => r.outcome === "unknown");
-    const report = groups.flatMap(([key, label]) => combined.filter((r) => r.outcome === key).map((r) => `${label}: ${r.row?.printedId || r.row?.requestedId || "Batch"} — ${r.message || key}`)).join("\n");
+    const report = groups.flatMap(([key, label]) => combined.filter((r) => r.outcome === key).map((r) => {
+      const cond = r.row?.condition ? ` [${r.row.condition}]` : "";
+      return `${label}: ${r.row?.printedId || r.row?.requestedId || "Batch"}${cond} — ${r.message || key}`;
+    })).join("\n");
     const copy = el("button", { type: "button", text: "Copy report", onClick: async (event) => {
       try { await navigator.clipboard.writeText(report); event.currentTarget.textContent = "Copied"; }
       catch { event.currentTarget.textContent = "Copy failed"; }

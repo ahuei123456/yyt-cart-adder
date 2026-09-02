@@ -73,11 +73,16 @@ function makeRequest(value, index) {
       : printedId
         ? [printedId]
         : [];
+  const condition =
+    value && typeof value === "object" && typeof value.condition === "string"
+      ? value.condition
+      : null;
 
   return {
     originalId: printedId || originals[0] || String(value?.normalizedId ?? ""),
     originalIds: originals,
     normalizedId,
+    ...(condition ? { condition } : {}),
     requestedQuantity,
     sourceLines: sourceLines(value),
     inputIndex: index,
@@ -123,8 +128,9 @@ function normalizeRequests(requests) {
       invalidWithoutId.push(request);
       return;
     }
-    const existing = byId.get(request.normalizedId);
-    byId.set(request.normalizedId, mergeRequest(existing, request));
+    const key = `${request.normalizedId}:${request.condition ?? ""}`;
+    const existing = byId.get(key);
+    byId.set(key, mergeRequest(existing, request));
   });
   return [...byId.values(), ...invalidWithoutId];
 }
@@ -401,52 +407,53 @@ function makeInvalidRow(request) {
     availableStock: 0,
     plannedQuantity: 0,
     selected: false,
+    condition: request.condition ?? null,
   };
 }
 
-function makeRow(request, candidates) {
-  if (request.invalid) return makeInvalidRow(request);
+function makeMissingRow(request, reason = "PRODUCT_MISSING") {
+  return {
+    ...request,
+    status: "missing",
+    reason,
+    canonicalPrintedId: null,
+    product: null,
+    name: "",
+    priceYen: null,
+    availableStock: 0,
+    plannedQuantity: 0,
+    selected: false,
+    candidates: [],
+    condition: request.condition ?? null,
+  };
+}
 
-  const exact = candidates ?? [];
-  if (exact.length === 0) {
-    return {
-      ...request,
-      status: "missing",
-      reason: "PRODUCT_MISSING",
-      canonicalPrintedId: null,
-      product: null,
-      name: "",
-      priceYen: null,
-      availableStock: 0,
-      plannedQuantity: 0,
-      selected: false,
-      candidates: [],
-    };
-  }
+function makeAmbiguousRow(request, candidates) {
+  return {
+    ...request,
+    status: "ambiguous",
+    reason: "PRODUCT_AMBIGUOUS",
+    canonicalPrintedId: null,
+    product: null,
+    name: "",
+    priceYen: null,
+    availableStock: 0,
+    plannedQuantity: 0,
+    selected: false,
+    candidates,
+    condition: request.condition ?? null,
+  };
+}
 
-  if (exact.length > 1) {
-    return {
-      ...request,
-      status: "ambiguous",
-      reason: "PRODUCT_AMBIGUOUS",
-      canonicalPrintedId: null,
-      product: null,
-      name: "",
-      priceYen: null,
-      availableStock: 0,
-      plannedQuantity: 0,
-      selected: false,
-      candidates: exact,
-    };
-  }
-
-  const product = exact[0];
-  const numbers = numbersForProduct(product);
-  const soldOut = Boolean(product.soldOut) || numbers.stock <= 0;
-  const plannedQuantity = soldOut ? 0 : Math.min(request.requestedQuantity, numbers.stock);
-  const status =
-    soldOut ? "sold-out" : plannedQuantity < request.requestedQuantity ? "partial" : "ready";
-
+function buildRow(request, product, plannedQuantity, stock, statusOverride = null) {
+  const soldOut = Boolean(product.soldOut) || stock <= 0;
+  const status = statusOverride
+    ? statusOverride
+    : soldOut
+      ? "sold-out"
+      : plannedQuantity < request.requestedQuantity
+        ? "partial"
+        : "ready";
   return {
     ...request,
     status,
@@ -457,14 +464,133 @@ function makeRow(request, candidates) {
           ? "PRODUCT_PARTIAL_STOCK"
           : "PRODUCT_SOLD_OUT",
     canonicalPrintedId: product.printedId,
+    condition: product.condition || (product.kizu === "0" ? "normal" : "damaged"),
+    kizu: product.kizu,
     product,
     name: product.name ?? "",
     priceYen: product.priceYen ?? null,
-    availableStock: numbers.stock,
+    availableStock: stock,
     plannedQuantity,
-    selected: status === "ready" || status === "partial",
-    candidates: exact,
+    selected: plannedQuantity > 0,
+    candidates: [product],
   };
+}
+
+function makeSingleRow(request, product, requestedQuantity) {
+  const numbers = numbersForProduct(product);
+  const soldOut = Boolean(product.soldOut) || numbers.stock <= 0;
+  const plannedQuantity = soldOut ? 0 : Math.min(requestedQuantity, numbers.stock);
+  const status =
+    soldOut ? "sold-out" : plannedQuantity < requestedQuantity ? "partial" : "ready";
+  return buildRow(request, product, plannedQuantity, numbers.stock, status);
+}
+
+export function makeRows(request, candidates, options = {}) {
+  if (request.invalid) return [makeInvalidRow(request)];
+
+  const exact = candidates ?? [];
+  if (exact.length === 0) {
+    return [makeMissingRow(request)];
+  }
+
+  const normal = exact.filter((c) => String(c.kizu).trim() === "0");
+  const damaged = exact.filter((c) => String(c.kizu).trim() !== "0");
+  const preference = options.conditionPreference || "prefer-damaged";
+  const reqCond = request.condition;
+
+  // If request explicitly asks for normal
+  if (reqCond === "normal") {
+    if (normal.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
+    if (normal.length > 1) return [makeAmbiguousRow(request, normal)];
+    const normalRow = makeSingleRow(request, normal[0], request.requestedQuantity);
+    if (damaged.length === 1) {
+      const damagedStock = numbersForProduct(damaged[0]).stock;
+      const damagedRow = buildRow(request, damaged[0], 0, damagedStock);
+      damagedRow.selected = false;
+      return [normalRow, damagedRow];
+    }
+    return [normalRow];
+  }
+
+  // If request explicitly asks for damaged
+  if (reqCond === "damaged") {
+    if (damaged.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
+    if (damaged.length > 1) return [makeAmbiguousRow(request, damaged)];
+    const damagedRow = makeSingleRow(request, damaged[0], request.requestedQuantity);
+    if (normal.length === 1) {
+      const normalStock = numbersForProduct(normal[0]).stock;
+      const normalRow = buildRow(request, normal[0], 0, normalStock);
+      normalRow.selected = false;
+      return [damagedRow, normalRow];
+    }
+    return [damagedRow];
+  }
+
+  // If preference is strict normal-only
+  if (preference === "normal-only") {
+    if (normal.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
+    if (normal.length > 1) return [makeAmbiguousRow(request, normal)];
+    return [makeSingleRow(request, normal[0], request.requestedQuantity)];
+  }
+
+  // If preference is strict damaged-only
+  if (preference === "damaged-only") {
+    if (damaged.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
+    if (damaged.length > 1) return [makeAmbiguousRow(request, damaged)];
+    return [makeSingleRow(request, damaged[0], request.requestedQuantity)];
+  }
+
+  // General preference: prefer-damaged or prefer-normal
+  if (normal.length > 1 || damaged.length > 1) {
+    return [makeAmbiguousRow(request, exact)];
+  }
+
+  if (normal.length === 1 && damaged.length === 0) {
+    return [makeSingleRow(request, normal[0], request.requestedQuantity)];
+  }
+
+  if (damaged.length === 1 && normal.length === 0) {
+    return [makeSingleRow(request, damaged[0], request.requestedQuantity)];
+  }
+
+  if (normal.length === 1 && damaged.length === 1) {
+    const totalRequested = request.requestedQuantity;
+    const normalStock = numbersForProduct(normal[0]).stock;
+    const damagedStock = numbersForProduct(damaged[0]).stock;
+
+    if (preference === "prefer-damaged") {
+      const damagedPlanned = Math.min(totalRequested, damagedStock);
+      const normalPlanned = Math.min(Math.max(0, totalRequested - damagedPlanned), normalStock);
+      const totalAllocated = damagedPlanned + normalPlanned;
+      const damagedStatus = damagedStock <= 0 ? "sold-out" : (totalAllocated < totalRequested ? "partial" : "ready");
+      const normalStatus = normalStock <= 0 ? "sold-out" : (totalAllocated < totalRequested ? "partial" : "ready");
+
+      const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
+      damagedRow.selected = damagedPlanned > 0;
+      const normalRow = buildRow(request, normal[0], normalPlanned, normalStock, normalStatus);
+      normalRow.selected = normalPlanned > 0;
+      return [damagedRow, normalRow];
+    } else {
+      // prefer-normal
+      const normalPlanned = Math.min(totalRequested, normalStock);
+      const damagedPlanned = Math.min(Math.max(0, totalRequested - normalPlanned), damagedStock);
+      const totalAllocated = normalPlanned + damagedPlanned;
+      const normalStatus = normalStock <= 0 ? "sold-out" : (totalAllocated < totalRequested ? "partial" : "ready");
+      const damagedStatus = damagedStock <= 0 ? "sold-out" : (totalAllocated < totalRequested ? "partial" : "ready");
+
+      const normalRow = buildRow(request, normal[0], normalPlanned, normalStock, normalStatus);
+      normalRow.selected = normalPlanned > 0;
+      const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
+      damagedRow.selected = damagedPlanned > 0;
+      return [normalRow, damagedRow];
+    }
+  }
+
+  return [makeMissingRow(request)];
+}
+
+export function makeRow(request, candidates, options = {}) {
+  return makeRows(request, candidates, options)[0];
 }
 
 async function delayBetweenQueries(options, queryNumber) {
@@ -485,8 +611,7 @@ function assertStructure(parsed, query, expectedIds) {
   // elements throughout.
   const allCandidatesInvalid =
     parsed.cardProductCount > 0 &&
-    parsed.products.length === 0 &&
-    (parsed.rejected ?? []).some((error) => error?.code !== "PRODUCT_DAMAGED");
+    parsed.products.length === 0;
   const noCardMarkup = parsed.cardProductCount === 0 && !parsed.explicitEmpty;
   if (allCandidatesInvalid || (noCardMarkup && matching.size === 0)) {
     throw new LookupError(
@@ -568,7 +693,9 @@ export async function lookupProducts(requests, options = {}) {
     });
   }
 
-  const rows = normalizedRequests.map((request) => makeRow(request, candidatesById.get(request.normalizedId)));
+  const rows = normalizedRequests.flatMap((request) =>
+    makeRows(request, candidatesById.get(request.normalizedId), options),
+  );
   return {
     rows,
     items: rows,

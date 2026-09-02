@@ -476,10 +476,10 @@ function validateProduct(product) {
       );
     }
   }
-  if (product.kizu != null && String(product.kizu) !== "0") {
+  if (product.kizu != null && !/^\d+$/u.test(String(product.kizu).trim())) {
     throw new CartError(
       CART_ERROR_CODES.CART_REJECTED,
-      "Only normal-condition products can be added by this tool.",
+      "The resolved product has an invalid condition code.",
     );
   }
 }
@@ -561,7 +561,7 @@ export function buildCartRequest(product, plannedQuantity, csrfToken, options = 
     mode: "add",
     type: "sell",
     counter: String(quantity),
-    kizu: "0",
+    kizu: String(product.kizu ?? "0"),
     time: timestampValue(config.now),
   });
 

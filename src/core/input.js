@@ -65,6 +65,18 @@ function makeInputError({ lineNumber, raw, message, lineNumbers = [lineNumber], 
   };
 }
 
+function parseConditionToken(token) {
+  if (typeof token !== "string") return null;
+  const lower = token.trim().toLowerCase();
+  if (lower === "damaged" || lower === "damage" || lower === "kizu" || lower === "1") {
+    return "damaged";
+  }
+  if (lower === "normal" || lower === "0") {
+    return "normal";
+  }
+  return null;
+}
+
 function parseLine(raw, lineNumber) {
   const trimmed = raw.trim();
   if (!trimmed || trimmed.startsWith("#")) {
@@ -99,21 +111,15 @@ function parseLine(raw, lineNumber) {
     };
   }
 
-  let quantityText = idMatch[2]?.trim() ?? "";
-  if (!quantityText) {
+  const remainder = idMatch[2]?.trim() ?? "";
+  if (!remainder) {
     return {
       kind: "request",
       request: { originalId, normalizedId, quantity: 1, lineNumber },
     };
   }
 
-  // Permit both `ID,1` and `ID , 1`, but only one comma separator. A comma
-  // appearing anywhere else remains an invalid extra token.
-  if (quantityText.startsWith(",")) {
-    quantityText = quantityText.slice(1).trim();
-  }
-
-  if (!INTEGER_PATTERN.test(quantityText)) {
+  if (remainder.includes(",,") || remainder.endsWith(",")) {
     return {
       kind: "error",
       error: makeInputError({
@@ -126,8 +132,87 @@ function parseLine(raw, lineNumber) {
     };
   }
 
-  const quantity = Number(quantityText);
-  if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 99) {
+  const tokens = remainder.split(/[\s,]+/u).filter(Boolean);
+  let quantity = 1;
+  let condition = null;
+
+  if (tokens.length === 1) {
+    if (INTEGER_PATTERN.test(tokens[0])) {
+      const parsedQty = Number(tokens[0]);
+      if (!Number.isSafeInteger(parsedQty) || parsedQty < 1 || parsedQty > 99) {
+        return {
+          kind: "error",
+          error: makeInputError({
+            lineNumber,
+            raw,
+            original: originalId,
+            normalizedId,
+            message: "Quantity must be a whole number from 1 through 99.",
+          }),
+        };
+      }
+      quantity = parsedQty;
+    } else {
+      const parsedCondition = parseConditionToken(tokens[0]);
+      if (parsedCondition) {
+        condition = parsedCondition;
+      } else {
+        return {
+          kind: "error",
+          error: makeInputError({
+            lineNumber,
+            raw,
+            original: originalId,
+            normalizedId,
+            message: "Quantity must be a whole number from 1 through 99.",
+          }),
+        };
+      }
+    }
+  } else if (tokens.length === 2) {
+    if (!INTEGER_PATTERN.test(tokens[0])) {
+      return {
+        kind: "error",
+        error: makeInputError({
+          lineNumber,
+          raw,
+          original: originalId,
+          normalizedId,
+          message: "Quantity must be a whole number from 1 through 99.",
+        }),
+      };
+    }
+    const parsedQty = Number(tokens[0]);
+    if (!Number.isSafeInteger(parsedQty) || parsedQty < 1 || parsedQty > 99) {
+      return {
+        kind: "error",
+        error: makeInputError({
+          lineNumber,
+          raw,
+          original: originalId,
+          normalizedId,
+          message: "Quantity must be a whole number from 1 through 99.",
+        }),
+      };
+    }
+    quantity = parsedQty;
+
+    const parsedCondition = parseConditionToken(tokens[1]);
+    if (parsedCondition) {
+      condition = parsedCondition;
+    } else {
+      return {
+        kind: "error",
+        error: makeInputError({
+          lineNumber,
+          raw,
+          original: originalId,
+          normalizedId,
+          message: "Condition must be 'damaged' (1) or 'normal' (0).",
+        }),
+      };
+    }
+  } else {
     return {
       kind: "error",
       error: makeInputError({
@@ -135,14 +220,18 @@ function parseLine(raw, lineNumber) {
         raw,
         original: originalId,
         normalizedId,
-        message: "Quantity must be a whole number from 1 through 99.",
+        message: "Unexpected extra tokens on line.",
       }),
     };
   }
 
+  const request = { originalId, normalizedId, quantity, lineNumber };
+  if (condition) {
+    request.condition = condition;
+  }
   return {
     kind: "request",
-    request: { originalId, normalizedId, quantity, lineNumber },
+    request,
   };
 }
 
@@ -174,8 +263,9 @@ export function parseInput(input) {
       return;
     }
 
-    const { originalId, normalizedId, quantity, lineNumber: sourceLine } = parsed.request;
-    const existing = requestsById.get(normalizedId);
+    const { originalId, normalizedId, quantity, condition, lineNumber: sourceLine } = parsed.request;
+    const key = `${normalizedId}:${condition ?? ""}`;
+    const existing = requestsById.get(key);
     if (existing) {
       existing.originalIds.push(originalId);
       existing.sourceLines.push(sourceLine);
@@ -183,18 +273,22 @@ export function parseInput(input) {
       return;
     }
 
-    requestsById.set(normalizedId, {
+    const item = {
       originalIds: [originalId],
       normalizedId,
       requestedQuantity: quantity,
       sourceLines: [sourceLine],
-    });
+    };
+    if (condition) {
+      item.condition = condition;
+    }
+    requestsById.set(key, item);
   });
 
   // Aggregation overflow is reported as one invalid logical line with all
   // contributing source lines, and is excluded from requests so it cannot be
   // selected accidentally by the lookup or cart layers.
-  for (const [normalizedId, request] of requestsById) {
+  for (const [key, request] of requestsById) {
     if (request.requestedQuantity <= 99) {
       continue;
     }
@@ -205,11 +299,11 @@ export function parseInput(input) {
         lineNumbers: [...request.sourceLines],
         raw: request.originalIds.join(", "),
         original: request.originalIds[0],
-        normalizedId,
+        normalizedId: request.normalizedId,
         message: `Combined quantity for ${request.originalIds[0]} exceeds the maximum of 99.`,
       }),
     );
-    requestsById.delete(normalizedId);
+    requestsById.delete(key);
   }
 
   errors.sort((left, right) => left.lineNumber - right.lineNumber);

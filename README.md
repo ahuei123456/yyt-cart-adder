@@ -2,7 +2,7 @@
 
 A personal-use Tampermonkey userscript for resolving exact Weiss Schwarz printed card IDs on Yuyu-tei, reviewing current price and stock, and adding explicitly selected quantities to the existing sales cart.
 
-The script is intentionally conservative: it accepts only exact normal-condition matches, never substitutes cards, never clears the cart, never retries an uncertain cart mutation, and never proceeds into checkout. Quantities mean **add this many more copies**; they are not final-cart targets.
+The script is intentionally conservative: it accepts only exact matches, never substitutes different cards, never clears the cart, never retries an uncertain cart mutation, and never proceeds into checkout. Quantities mean **add this many more copies**; they are not final-cart targets.
 
 ## Install
 
@@ -12,19 +12,31 @@ The script is intentionally conservative: it accepts only exact normal-condition
 
 No runtime dependencies, external scripts, analytics, or persistent storage are used.
 
-## Input
+## Input & Condition Selection
 
-Enter one card per line. Quantity defaults to 1:
+Enter one card per line. Quantity defaults to 1. An optional condition (`damaged` / `1` or `normal` / `0`) can be specified:
 
 ```text
 Kka/W102-005SEC 1
 Kka/W102-005SEC,1
-Kka/W102-005SEC	1
-Kka/W102-005SEC
+Kka/W102-005SEC 2 damaged
+Kka/W102-005SEC,1,damaged
+Kka/W102-005SEC 1 1
+Kka/W102-005SEC 1,damaged
+Kka/W102-005SEC damaged
 # comments and blank lines are ignored
 ```
 
-Quantities must be integers from 1 through 99. Duplicate IDs are combined case-insensitively. Review every resolved line before adding it.
+### Condition Preference & Disambiguation
+
+- **Global Selector**: Choose your preference on the input screen:
+  - **Prefer damaged, fall back to normal** (default)
+  - **Prefer normal, fall back to damaged**
+  - **Normal condition only**
+  - **Damaged condition only**
+- **Disambiguation in Review**: When both normal and damaged copies are available, both options appear in the review table. You can freely adjust the quantity input for normal and damaged cards to specify exactly how many of each condition to add.
+
+Quantities must be integers from 1 through 99. Duplicate lines for the same card and condition are aggregated. Review every resolved line before adding it.
 
 ## Development
 

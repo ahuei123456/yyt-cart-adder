@@ -37,5 +37,10 @@ tr.unavailable { color: #667085; background: #f8fafc; }
 .result-group { padding: 12px; border: 1px solid #d8dee8; border-radius: 8px; }
 .result-group ul { margin: 8px 0 0; padding-left: 20px; }
 a { color: #175cd3; }
+.badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.badge-normal { background: #ecfdf3; color: #027a48; border: 1px solid #abefc6; }
+.badge-damaged { background: #fffaeb; color: #b54708; border: 1px solid #fedf89; }
+.qty-input { width: 56px; padding: 3px 5px; border: 1px solid #98a2b3; border-radius: 5px; text-align: right; font-size: 13px; }
+.select-pref { width: 100%; padding: 8px 10px; border: 1px solid #98a2b3; border-radius: 7px; font-size: 14px; background: #fff; }
 @media (max-width: 600px) { .backdrop { padding: 0; place-items: stretch; } .panel { width: 100%; max-height: 100vh; border-radius: 0; } .body { padding: 14px; } .launcher { right: 10px; bottom: 10px; } }
 `;

@@ -137,6 +137,20 @@ test("handles SUCCESS JSON even when the MIME type is text/html", async () => {
   assert.equal("quantity" in calls[0].init, false);
 });
 
+test("handles damaged card addition with kizu 1", async () => {
+  const { calls, fetchImpl } = requestCalls([response(200, '{"status":"SUCCESS"}')]);
+  const result = await addCartItem(product({ kizu: "1", condition: "damaged" }), 2, {
+    csrfToken: "csrf",
+    fetchImpl,
+  });
+
+  assert.equal(result.outcome, "success");
+  assert.equal(result.attemptedQuantity, 2);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.body.get("counter"), "2");
+  assert.equal(calls[0].init.body.get("kizu"), "1");
+});
+
 test("maps invalid JSON to a definite response failure", async () => {
   const { fetchImpl } = requestCalls([response(200, "not-json")]);
   const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetchImpl });
