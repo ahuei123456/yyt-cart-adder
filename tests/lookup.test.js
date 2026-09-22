@@ -316,3 +316,40 @@ test("a missing condition is reported with the other condition offered", async (
     );
   }
 });
+
+test("drops option rows for products another line already resolves to", async () => {
+  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const result = await lookupProducts(
+    [
+      { originalId: "Kka/W102-005SEC", requestedQuantity: 4, sourceLines: [1] },
+      { originalId: "Kka/W102-005SEC", requestedQuantity: 1, condition: "damaged", sourceLines: [2] },
+    ],
+    { fetch: mock.fetch, delayMs: 0, conditionPreference: "normal-only" },
+  );
+  assert.deepEqual(
+    result.rows.map((r) => [r.sourceLines[0], r.condition, r.status, r.plannedQuantity]),
+    [
+      [1, "normal", "partial", 2],
+      [2, "damaged", "ready", 1],
+    ],
+  );
+});
+
+test("keeps only the first of repeated option rows", async () => {
+  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const result = await lookupProducts(
+    [
+      { originalId: "Kka/W102-005SEC", requestedQuantity: 1, sourceLines: [1] },
+      { originalId: "Kka/W102-005SEC", requestedQuantity: 1, condition: "normal", sourceLines: [2] },
+    ],
+    { fetch: mock.fetch, delayMs: 0, conditionPreference: "normal-only" },
+  );
+  assert.deepEqual(
+    result.rows.map((r) => [r.sourceLines[0], r.condition, r.status]),
+    [
+      [1, "normal", "ready"],
+      [1, "damaged", "option"],
+      [2, "normal", "ready"],
+    ],
+  );
+});

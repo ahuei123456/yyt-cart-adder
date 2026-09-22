@@ -1011,8 +1011,23 @@
       status: row.status === "sold-out" ? "sold-out" : "option",
       reason: row.status === "sold-out" ? "PRODUCT_SOLD_OUT" : reason,
       plannedQuantity: 0,
-      selected: false
+      selected: false,
+      isOption: true
     };
+  }
+  function productKey(product) {
+    return product ? [product.ver, product.cid, product.kizu].join("|") : null;
+  }
+  function dropDuplicateOptions(rows) {
+    const resolved = new Set(rows.filter((row) => row.product && !row.isOption).map((row) => productKey(row.product)));
+    const offered = /* @__PURE__ */ new Set();
+    return rows.filter((row) => {
+      if (!row.isOption) return true;
+      const key = productKey(row.product);
+      if (resolved.has(key) || offered.has(key)) return false;
+      offered.add(key);
+      return true;
+    });
   }
   function groupByRarity(candidates) {
     const groups = /* @__PURE__ */ new Map();
@@ -1179,8 +1194,10 @@
         productCount: parsed.products.length
       });
     }
-    const rows = normalizedRequests.flatMap(
-      (request) => makeRows(request, candidatesById.get(request.normalizedId), options)
+    const rows = dropDuplicateOptions(
+      normalizedRequests.flatMap(
+        (request) => makeRows(request, candidatesById.get(request.normalizedId), options)
+      )
     );
     return {
       rows,
@@ -1942,7 +1959,8 @@ a { color: #175cd3; }
         const normalCards = chosen.filter((r) => r.condition !== "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
         const damagedCards = chosen.filter((r) => r.condition === "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
         const total = chosen.reduce((n, r) => n + (r.priceYen || 0) * r.plannedQuantity, 0);
-        let desc = `${chosen.length} product${chosen.length === 1 ? "" : "s"} / ${totalCards} card${totalCards === 1 ? "" : "s"}`;
+        const productCount = new Set(chosen.map((r) => r.product ? [r.product.ver, r.product.cid, r.product.kizu].join("|") : r)).size;
+        let desc = `${productCount} product${productCount === 1 ? "" : "s"} / ${totalCards} card${totalCards === 1 ? "" : "s"}`;
         if (damagedCards > 0 && normalCards > 0) {
           desc += ` (${normalCards} normal, ${damagedCards} damaged)`;
         } else if (damagedCards > 0) {
@@ -1963,11 +1981,31 @@ a { color: #175cd3; }
           for (const r of group) rowElements.get(r)?.classList.toggle("over", isOver);
           if (isOver) over.push(`${group[0].requestedId || group[0].originalId}: adding ${adding2}, requested ${requested}`);
         }
-        overWarning.hidden = !over.length;
-        overWarning.textContent = over.length ? `More copies than requested:
-${over.join("\n")}` : "";
+        const byProduct = /* @__PURE__ */ new Map();
+        for (const r of rows) {
+          const key = r.product ? [r.product.ver, r.product.cid, r.product.kizu].join("|") : null;
+          if (!key) continue;
+          if (!byProduct.has(key)) byProduct.set(key, []);
+          byProduct.get(key).push(r);
+        }
+        const overStock = [];
+        for (const group of byProduct.values()) {
+          const adding2 = group.filter((r) => r.selected).reduce((n, r) => n + (r.plannedQuantity || 0), 0);
+          const stock = group[0].stock ?? group[0].availableStock ?? 0;
+          const isOver = group.length > 1 && adding2 > stock;
+          for (const r of group) if (isOver) rowElements.get(r)?.classList.add("over");
+          if (isOver) overStock.push(`${group[0].printedId} (${group[0].condition}): adding ${adding2} across lines, ${stock} in stock`);
+        }
+        const messages = [
+          over.length ? `More copies than requested:
+${over.join("\n")}` : "",
+          overStock.length ? `More than YYT has in stock:
+${overStock.join("\n")}` : ""
+        ].filter(Boolean);
+        overWarning.hidden = !messages.length;
+        overWarning.textContent = messages.join("\n\n");
         totalText.textContent = `Estimated selected total: ${yen.format(total)}`;
-        submit.textContent = `Add ${totalCards} cards from ${chosen.length} products`;
+        submit.textContent = `Add ${totalCards} card${totalCards === 1 ? "" : "s"} from ${productCount} product${productCount === 1 ? "" : "s"}`;
         submit.disabled = !chosen.length;
       };
       for (const row of rows) {

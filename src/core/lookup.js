@@ -507,7 +507,30 @@ function asOption(row, reason) {
     reason: row.status === "sold-out" ? "PRODUCT_SOLD_OUT" : reason,
     plannedQuantity: 0,
     selected: false,
+    isOption: true,
   };
+}
+
+export function productKey(product) {
+  return product ? [product.ver, product.cid, product.kizu].join("|") : null;
+}
+
+/**
+ * Two input lines for the same ID (say `ID 4` and `ID 1 damaged`) each offer
+ * the other's product as an option.  Keep one row per product: drop an option
+ * when another line already resolves to that product, and keep only the
+ * first of repeated options.
+ */
+function dropDuplicateOptions(rows) {
+  const resolved = new Set(rows.filter((row) => row.product && !row.isOption).map((row) => productKey(row.product)));
+  const offered = new Set();
+  return rows.filter((row) => {
+    if (!row.isOption) return true;
+    const key = productKey(row.product);
+    if (resolved.has(key) || offered.has(key)) return false;
+    offered.add(key);
+    return true;
+  });
 }
 
 function groupByRarity(candidates) {
@@ -739,8 +762,10 @@ export async function lookupProducts(requests, options = {}) {
     });
   }
 
-  const rows = normalizedRequests.flatMap((request) =>
-    makeRows(request, candidatesById.get(request.normalizedId), options),
+  const rows = dropDuplicateOptions(
+    normalizedRequests.flatMap((request) =>
+      makeRows(request, candidatesById.get(request.normalizedId), options),
+    ),
   );
   return {
     rows,
