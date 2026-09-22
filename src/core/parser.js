@@ -202,6 +202,39 @@ function readPrintedId(element) {
   return null;
 }
 
+// Rarity labels as YYT prints them: `RR`, `S-RR`, `SP`, `SEC+`, `PR`.
+const RARITY_PATTERN = /^(?:[A-Za-z]{1,2}-)?[A-Za-z]{1,4}\+?$/u;
+
+export function normalizeRarity(value) {
+  if (value == null) return null;
+  const text = String(value).trim().toLocaleUpperCase("en-US");
+  return RARITY_PATTERN.test(text) ? text : null;
+}
+
+/**
+ * Some sets list two products under one printed ID (for example RZ/SE35-01 as
+ * both RR and the S-RR holo parallel).  The only distinguishing labels are
+ * the rarity token after the ID in the image alt and the list heading the card
+ * sits under.  The rarity never establishes identity on its own; it only
+ * separates products that already share an exact printed ID.
+ */
+function readRarity(element, printedId, sectionRarity) {
+  for (const image of queryAll(element, "img.card")) {
+    const alt = cleanText(getAttribute(image, "alt"));
+    const index = alt.indexOf(printedId);
+    if (index < 0) continue;
+    const token = alt.slice(index + printedId.length).trim().split(" ")[0];
+    const rarity = normalizeRarity(token);
+    if (rarity) return rarity;
+  }
+  return sectionRarity ?? null;
+}
+
+function readSectionRarity(heading) {
+  const match = /^(\S+)\s+Card List$/iu.exec(nodeText(heading));
+  return match ? normalizeRarity(match[1]) : null;
+}
+
 function readDetailUrl(element) {
   const link = queryOne(element, 'a[href*="/sell/ws/card/"]');
   return getAttribute(link, "href")?.trim() || null;
@@ -241,7 +274,7 @@ function requiredFieldError(field) {
  * additionally records why a candidate was rejected, which lets lookup
  * distinguish a normal empty result from a wholesale selector break.
  */
-function parseProductElementDetailed(element) {
+function parseProductElementDetailed(element, sectionRarity = null) {
   if (!element) return { product: null, error: requiredFieldError("card-product") };
 
   const gid = readField(element, ".cart_gid");
@@ -297,6 +330,7 @@ function parseProductElementDetailed(element) {
   const product = {
     printedId,
     normalizedId: normalizePrintedId(printedId),
+    rarity: readRarity(element, printedId, sectionRarity),
     name: nodeText(queryOne(element, "h4")),
     gid: String(gid),
     ver: String(ver),
@@ -485,8 +519,19 @@ function parseFallbackHtml(html) {
   return root;
 }
 
+/**
+ * Return card elements in document order, each paired with the rarity of the
+ * `… Card List` heading above it.  Both DOMParser and the fallback tree return
+ * comma-selector matches in document order.
+ */
 function collectCardProducts(document) {
-  return queryAll(document, ".card-product");
+  const cards = [];
+  let sectionRarity = null;
+  for (const element of queryAll(document, "h3, .card-product")) {
+    if (hasClass(element, "card-product")) cards.push({ element, sectionRarity });
+    else sectionRarity = readSectionRarity(element);
+  }
+  return cards;
 }
 
 /**
@@ -504,8 +549,8 @@ export function parseSearchResults(html, options = {}) {
   const products = [];
   const rejected = [];
 
-  for (const element of cardElements) {
-    const parsed = parseProductElementDetailed(element);
+  for (const { element, sectionRarity } of cardElements) {
+    const parsed = parseProductElementDetailed(element, sectionRarity);
     if (parsed.product) products.push(parsed.product);
     else rejected.push(parsed.error);
   }

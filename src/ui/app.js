@@ -17,11 +17,13 @@ function el(tag, props = {}, ...children) {
 
 function statusReason(row) {
   const cond = row.condition === "damaged" ? "damaged" : "normal";
+  const also = row.otherRarities?.length ? ` (also sold as ${row.otherRarities.join(", ")})` : "";
   const messages = {
-    ready: "Ready",
+    ready: `Ready${also}`,
+    option: `Same ID in another rarity${also}; set a quantity to add`,
     partial: `Requested ${row.requestedQuantity}; adding ${row.plannedQuantity}`,
     "sold-out": `Card is sold out in ${cond} condition`,
-    missing: "No exact card found",
+    missing: row.reason === "PRODUCT_RARITY_MISSING" ? `No ${row.rarity} product for this ID` : "No exact card found",
     ambiguous: "Multiple exact products found; skipped",
     invalid: row.reason || "Invalid input",
   };
@@ -81,7 +83,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
   function showInput(saved = "", savedPref = "prefer-damaged") {
     adding = false;
     cancelRequested = false;
-    const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2 damaged" });
+    const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2 damaged\nRZ/SE35-01 1 S-RR" });
     input.value = saved;
     const prefSelect = el("select", { id: "yyt-condition-preference", className: "select-pref" },
       el("option", { value: "prefer-damaged", text: "Prefer damaged, fall back to normal" }),
@@ -106,7 +108,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     });
     setView(
       el("p", { className: "warning", text: "Quantities below will be added to anything already in your cart." }),
-      el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged' (or 1) for damaged copies. Lines beginning with # are ignored." }),
+      el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged' (or 1) for damaged copies, and a rarity such as RR or S-RR when an ID is sold in more than one. Lines beginning with # are ignored." }),
       el("label", { for: "yyt-condition-preference", text: "Condition preference" }, prefSelect),
       el("label", { for: "yyt-card-list", text: "Card IDs and quantities" }, input),
       errorBox,
@@ -142,7 +144,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
   }
 
   function showReview(rows, source, conditionPreference = "prefer-damaged") {
-    const isRowSelectable = (r) => (r.status === "ready" || r.status === "partial") && (r.stock ?? r.availableStock ?? 0) > 0;
+    const isRowSelectable = (r) => (r.status === "ready" || r.status === "partial" || r.status === "option") && (r.stock ?? r.availableStock ?? 0) > 0;
     for (const row of rows) {
       if (typeof row.selected !== "boolean") {
         row.selected = isRowSelectable(row) && row.plannedQuantity > 0;
@@ -233,6 +235,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
           el("td", {}, checkbox),
           el("td", { text: row.requestedId || row.originalIds?.[0] || "—" }),
           el("td", { text: row.printedId || "—" }),
+          el("td", { text: row.rarity || "—" }),
           el("td", {}, condBadge),
           el("td", { text: row.name || "—" }),
           el("td", { className: "num", text: Number.isFinite(row.priceYen) ? yen.format(row.priceYen) : "—" }),
@@ -245,7 +248,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     }
 
     const table = el("table", {},
-      el("thead", {}, el("tr", {}, ...["Use", "Requested ID", "YYT ID", "Cond.", "Name", "Price", "Requested", "Stock", "Adding", "Status"].map((x) => el("th", { text: x })))), tbody);
+      el("thead", {}, el("tr", {}, ...["Use", "Requested ID", "YYT ID", "Rarity", "Cond.", "Name", "Price", "Requested", "Stock", "Adding", "Status"].map((x) => el("th", { text: x })))), tbody);
     submit.addEventListener("click", async () => {
       if (adding) return;
       const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
@@ -254,7 +257,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     update();
     setView(
       el("h3", { text: "Review matches & allocate quantities" }),
-      el("p", { className: "warning", text: "Quantities will be added to the existing cart. Adjust Normal vs Damaged quantities as desired." }),
+      el("p", { className: "warning", text: "Quantities will be added to the existing cart. Adjust quantities across conditions and rarities as desired." }),
       el("div", { className: "table-wrap" }, table),
       el("div", { className: "summary" }, countText, totalText),
       el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source, conditionPreference) }), submit),
@@ -287,7 +290,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
         for (const pending of chosen.slice(index)) results.push({ row: pending, outcome: "skipped", message: "Cancelled before request" });
         break;
       }
-      current.textContent = `Adding ${row.printedId} (${index + 1} of ${chosen.length})…`;
+      current.textContent = `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${chosen.length})…`;
       let result;
       try { result = await addItem(row, token, { signal: addController.signal }); }
       catch (error) { result = { outcome: "unknown", message: error.message || "Response was lost; inspect the cart before retrying." }; }
@@ -315,14 +318,14 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
       if (!matches.length) return null;
       const list = el("ul");
       for (const result of matches) {
-        const cond = result.row?.condition ? ` [${result.row.condition}]` : "";
+        const cond = [result.row?.rarity, result.row?.condition].filter(Boolean).map((x) => ` [${x}]`).join("");
         list.append(el("li", { text: `${result.row?.printedId || result.row?.requestedId || "Batch"}${cond}: ${result.message || key}` }));
       }
       return el("section", { className: "result-group" }, el("h3", { text: `${label} (${matches.length})` }), list);
     }).filter(Boolean);
     const hasUnknown = combined.some((r) => r.outcome === "unknown");
     const report = groups.flatMap(([key, label]) => combined.filter((r) => r.outcome === key).map((r) => {
-      const cond = r.row?.condition ? ` [${r.row.condition}]` : "";
+      const cond = [r.row?.rarity, r.row?.condition].filter(Boolean).map((x) => ` [${x}]`).join("");
       return `${label}: ${r.row?.printedId || r.row?.requestedId || "Batch"}${cond} — ${r.message || key}`;
     })).join("\n");
     const copy = el("button", { type: "button", text: "Copy report", onClick: async (event) => {

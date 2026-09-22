@@ -210,3 +210,30 @@ test("aggregates duplicate cards with same condition and keeps distinct conditio
   assert.equal(normal.requestedQuantity, 3);
   assert.deepEqual(normal.sourceLines, [3]);
 });
+
+test("parses an optional uppercase rarity in any position after the quantity", () => {
+  const result = parseInput([
+    "RZ/SE35-01 2 S-RR",
+    "RZ/SE35-02 S-RR damaged",
+    "RZ/SE35-03,1,damaged,RR",
+    "RZ/SE35-01 RR",
+    "RZ/SE35-01,1,S-RR",
+  ].join("\n"));
+
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(
+    result.requests.map((r) => [r.normalizedId, r.requestedQuantity, r.condition ?? null, r.rarity ?? null]),
+    [
+      ["rz/se35-01", 3, null, "S-RR"],
+      ["rz/se35-02", 1, "damaged", "S-RR"],
+      ["rz/se35-03", 1, "damaged", "RR"],
+      ["rz/se35-01", 1, null, "RR"],
+    ],
+  );
+});
+
+test("rejects lowercase or repeated rarity tokens", () => {
+  const result = parseInput("RZ/SE35-01 1 s-rr\nRZ/SE35-01 1 RR SP");
+  assert.equal(result.requests.length, 0);
+  assert.deepEqual(result.errors.map((e) => e.lineNumber), [1, 2]);
+});

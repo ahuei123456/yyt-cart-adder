@@ -77,6 +77,16 @@ function parseConditionToken(token) {
   return null;
 }
 
+// Rarity labels exactly as printed: `RR`, `S-RR`, `SP`, `SEC+`.  Requiring
+// uppercase keeps a misspelled word (`nope`, `damagd`) an input error instead
+// of an unknown rarity.
+const RARITY_TOKEN_PATTERN = /^(?:[A-Z]{1,2}-)?[A-Z]{1,4}\+?$/u;
+
+function parseRarityToken(token) {
+  if (typeof token !== "string" || !RARITY_TOKEN_PATTERN.test(token)) return null;
+  return token;
+}
+
 function parseLine(raw, lineNumber) {
   const trimmed = raw.trim();
   if (!trimmed || trimmed.startsWith("#")) {
@@ -133,101 +143,54 @@ function parseLine(raw, lineNumber) {
   }
 
   const tokens = remainder.split(/[\s,]+/u).filter(Boolean);
+  const tokenError = (message) => ({
+    kind: "error",
+    error: makeInputError({ lineNumber, raw, original: originalId, normalizedId, message }),
+  });
+  if (tokens.length > 3) {
+    return tokenError("Unexpected extra tokens on line.");
+  }
+
+  // Grammar: ID [quantity] [condition] [rarity], where condition and rarity
+  // may come in either order.  A leading integer is always the quantity, so
+  // `ID 1 1` stays "one damaged copy".
   let quantity = 1;
   let condition = null;
-
-  if (tokens.length === 1) {
-    if (INTEGER_PATTERN.test(tokens[0])) {
-      const parsedQty = Number(tokens[0]);
-      if (!Number.isSafeInteger(parsedQty) || parsedQty < 1 || parsedQty > 99) {
-        return {
-          kind: "error",
-          error: makeInputError({
-            lineNumber,
-            raw,
-            original: originalId,
-            normalizedId,
-            message: "Quantity must be a whole number from 1 through 99.",
-          }),
-        };
-      }
-      quantity = parsedQty;
-    } else {
-      const parsedCondition = parseConditionToken(tokens[0]);
-      if (parsedCondition) {
-        condition = parsedCondition;
-      } else {
-        return {
-          kind: "error",
-          error: makeInputError({
-            lineNumber,
-            raw,
-            original: originalId,
-            normalizedId,
-            message: "Quantity must be a whole number from 1 through 99.",
-          }),
-        };
-      }
-    }
-  } else if (tokens.length === 2) {
-    if (!INTEGER_PATTERN.test(tokens[0])) {
-      return {
-        kind: "error",
-        error: makeInputError({
-          lineNumber,
-          raw,
-          original: originalId,
-          normalizedId,
-          message: "Quantity must be a whole number from 1 through 99.",
-        }),
-      };
-    }
-    const parsedQty = Number(tokens[0]);
+  let rarity = null;
+  let rest = tokens;
+  if (INTEGER_PATTERN.test(rest[0])) {
+    const parsedQty = Number(rest[0]);
     if (!Number.isSafeInteger(parsedQty) || parsedQty < 1 || parsedQty > 99) {
-      return {
-        kind: "error",
-        error: makeInputError({
-          lineNumber,
-          raw,
-          original: originalId,
-          normalizedId,
-          message: "Quantity must be a whole number from 1 through 99.",
-        }),
-      };
+      return tokenError("Quantity must be a whole number from 1 through 99.");
     }
     quantity = parsedQty;
+    rest = rest.slice(1);
+  }
 
-    const parsedCondition = parseConditionToken(tokens[1]);
-    if (parsedCondition) {
+  for (const token of rest) {
+    const parsedCondition = parseConditionToken(token);
+    if (parsedCondition && !condition) {
       condition = parsedCondition;
-    } else {
-      return {
-        kind: "error",
-        error: makeInputError({
-          lineNumber,
-          raw,
-          original: originalId,
-          normalizedId,
-          message: "Condition must be 'damaged' (1) or 'normal' (0).",
-        }),
-      };
+      continue;
     }
-  } else {
-    return {
-      kind: "error",
-      error: makeInputError({
-        lineNumber,
-        raw,
-        original: originalId,
-        normalizedId,
-        message: "Unexpected extra tokens on line.",
-      }),
-    };
+    const parsedRarity = parseRarityToken(token);
+    if (parsedRarity && !rarity) {
+      rarity = parsedRarity;
+      continue;
+    }
+    return tokenError(
+      token === tokens[0]
+        ? "Quantity must be a whole number from 1 through 99."
+        : "Expected a condition ('damaged'/1 or 'normal'/0) or a rarity such as RR or S-RR.",
+    );
   }
 
   const request = { originalId, normalizedId, quantity, lineNumber };
   if (condition) {
     request.condition = condition;
+  }
+  if (rarity) {
+    request.rarity = rarity;
   }
   return {
     kind: "request",
@@ -263,8 +226,8 @@ export function parseInput(input) {
       return;
     }
 
-    const { originalId, normalizedId, quantity, condition, lineNumber: sourceLine } = parsed.request;
-    const key = `${normalizedId}:${condition ?? ""}`;
+    const { originalId, normalizedId, quantity, condition, rarity, lineNumber: sourceLine } = parsed.request;
+    const key = `${normalizedId}:${condition ?? ""}:${rarity ?? ""}`;
     const existing = requestsById.get(key);
     if (existing) {
       existing.originalIds.push(originalId);
@@ -281,6 +244,9 @@ export function parseInput(input) {
     };
     if (condition) {
       item.condition = condition;
+    }
+    if (rarity) {
+      item.rarity = rarity;
     }
     requestsById.set(key, item);
   });

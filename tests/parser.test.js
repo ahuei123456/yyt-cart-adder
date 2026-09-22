@@ -21,6 +21,7 @@ test("parses the exact available product fixture", () => {
   assert.deepEqual(report.products[0], {
     printedId: "Kka/W102-005SEC",
     normalizedId: "kka/w102-005sec",
+    rarity: null,
     name: "小さな奇跡の物語 あゆ(サイン入り)",
     gid: "7",
     ver: "key2.0",
@@ -116,4 +117,33 @@ test("recognizes a wholesale selector change", () => {
 test("normalization is case-insensitive but preserves punctuation", () => {
   assert.equal(normalizePrintedId("  Kka/W102-005SEC "), "kka/w102-005sec");
   assert.equal(extractPrintedId("card: Kka/W102-005SEC."), "Kka/W102-005SEC");
+});
+
+test("reads rarity from the image alt for IDs sold in two rarities", () => {
+  const report = parseSearchResults(fixture("search-dual-rarity.html"));
+  assert.equal(report.structureError, false);
+  assert.deepEqual(
+    report.products.map((p) => [p.printedId, p.rarity, p.cid]),
+    [
+      ["RZ/SE35-02SP", "SP", "10101"],
+      ["RZ/SE35-01", "RR", "10001"],
+      ["RZ/SE35-02", "RR", "10003"],
+      ["RZ/SE35-30", "C", "10059"],
+      ["RZ/SE35-01", "S-RR", "10002"],
+      ["RZ/SE35-02", "S-RR", "10004"],
+    ],
+  );
+});
+
+test("falls back to the Card List heading when the alt has no rarity", () => {
+  const card = (cid) => `
+    <div class="card-product">
+      <a href="/sell/ws/card/rzext1.0/${cid}"><img class="card" alt="RZ/SE35-01 エミリア"></a>
+      <span class="border">RZ/SE35-01</span><h4>エミリア</h4><strong>420 円</strong>
+      <input class="cart_gid" value="7"><input class="cart_ver" value="rzext1.0"><input class="cart_cid" value="${cid}"><input class="cart_kizu" value="0"><input class="cart_limit" value="1"><input class="cart_active" value="1">
+    </div>`;
+  const html = `
+    <h3><span>RR</span> Card List</h3>${card("10001")}
+    <h3><span>S-RR</span> Card List</h3>${card("10002")}`;
+  assert.deepEqual(parseSearchHtml(html).map((p) => p.rarity), ["RR", "S-RR"]);
 });

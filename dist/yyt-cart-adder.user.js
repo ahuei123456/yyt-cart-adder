@@ -79,6 +79,11 @@
     }
     return null;
   }
+  var RARITY_TOKEN_PATTERN = /^(?:[A-Z]{1,2}-)?[A-Z]{1,4}\+?$/u;
+  function parseRarityToken(token) {
+    if (typeof token !== "string" || !RARITY_TOKEN_PATTERN.test(token)) return null;
+    return token;
+  }
   function parseLine(raw, lineNumber) {
     const trimmed = raw.trim();
     if (!trimmed || trimmed.startsWith("#")) {
@@ -127,98 +132,46 @@
       };
     }
     const tokens = remainder.split(/[\s,]+/u).filter(Boolean);
+    const tokenError = (message) => ({
+      kind: "error",
+      error: makeInputError({ lineNumber, raw, original: originalId, normalizedId, message })
+    });
+    if (tokens.length > 3) {
+      return tokenError("Unexpected extra tokens on line.");
+    }
     let quantity = 1;
     let condition = null;
-    if (tokens.length === 1) {
-      if (INTEGER_PATTERN.test(tokens[0])) {
-        const parsedQty = Number(tokens[0]);
-        if (!Number.isSafeInteger(parsedQty) || parsedQty < 1 || parsedQty > 99) {
-          return {
-            kind: "error",
-            error: makeInputError({
-              lineNumber,
-              raw,
-              original: originalId,
-              normalizedId,
-              message: "Quantity must be a whole number from 1 through 99."
-            })
-          };
-        }
-        quantity = parsedQty;
-      } else {
-        const parsedCondition = parseConditionToken(tokens[0]);
-        if (parsedCondition) {
-          condition = parsedCondition;
-        } else {
-          return {
-            kind: "error",
-            error: makeInputError({
-              lineNumber,
-              raw,
-              original: originalId,
-              normalizedId,
-              message: "Quantity must be a whole number from 1 through 99."
-            })
-          };
-        }
-      }
-    } else if (tokens.length === 2) {
-      if (!INTEGER_PATTERN.test(tokens[0])) {
-        return {
-          kind: "error",
-          error: makeInputError({
-            lineNumber,
-            raw,
-            original: originalId,
-            normalizedId,
-            message: "Quantity must be a whole number from 1 through 99."
-          })
-        };
-      }
-      const parsedQty = Number(tokens[0]);
+    let rarity = null;
+    let rest = tokens;
+    if (INTEGER_PATTERN.test(rest[0])) {
+      const parsedQty = Number(rest[0]);
       if (!Number.isSafeInteger(parsedQty) || parsedQty < 1 || parsedQty > 99) {
-        return {
-          kind: "error",
-          error: makeInputError({
-            lineNumber,
-            raw,
-            original: originalId,
-            normalizedId,
-            message: "Quantity must be a whole number from 1 through 99."
-          })
-        };
+        return tokenError("Quantity must be a whole number from 1 through 99.");
       }
       quantity = parsedQty;
-      const parsedCondition = parseConditionToken(tokens[1]);
-      if (parsedCondition) {
+      rest = rest.slice(1);
+    }
+    for (const token of rest) {
+      const parsedCondition = parseConditionToken(token);
+      if (parsedCondition && !condition) {
         condition = parsedCondition;
-      } else {
-        return {
-          kind: "error",
-          error: makeInputError({
-            lineNumber,
-            raw,
-            original: originalId,
-            normalizedId,
-            message: "Condition must be 'damaged' (1) or 'normal' (0)."
-          })
-        };
+        continue;
       }
-    } else {
-      return {
-        kind: "error",
-        error: makeInputError({
-          lineNumber,
-          raw,
-          original: originalId,
-          normalizedId,
-          message: "Unexpected extra tokens on line."
-        })
-      };
+      const parsedRarity = parseRarityToken(token);
+      if (parsedRarity && !rarity) {
+        rarity = parsedRarity;
+        continue;
+      }
+      return tokenError(
+        token === tokens[0] ? "Quantity must be a whole number from 1 through 99." : "Expected a condition ('damaged'/1 or 'normal'/0) or a rarity such as RR or S-RR."
+      );
     }
     const request = { originalId, normalizedId, quantity, lineNumber };
     if (condition) {
       request.condition = condition;
+    }
+    if (rarity) {
+      request.rarity = rarity;
     }
     return {
       kind: "request",
@@ -241,8 +194,8 @@
         errors.push(parsed.error);
         return;
       }
-      const { originalId, normalizedId, quantity, condition, lineNumber: sourceLine } = parsed.request;
-      const key = `${normalizedId}:${condition ?? ""}`;
+      const { originalId, normalizedId, quantity, condition, rarity, lineNumber: sourceLine } = parsed.request;
+      const key = `${normalizedId}:${condition ?? ""}:${rarity ?? ""}`;
       const existing = requestsById.get(key);
       if (existing) {
         existing.originalIds.push(originalId);
@@ -258,6 +211,9 @@
       };
       if (condition) {
         item.condition = condition;
+      }
+      if (rarity) {
+        item.rarity = rarity;
       }
       requestsById.set(key, item);
     });
@@ -412,6 +368,27 @@
     }
     return null;
   }
+  var RARITY_PATTERN = /^(?:[A-Za-z]{1,2}-)?[A-Za-z]{1,4}\+?$/u;
+  function normalizeRarity(value) {
+    if (value == null) return null;
+    const text = String(value).trim().toLocaleUpperCase("en-US");
+    return RARITY_PATTERN.test(text) ? text : null;
+  }
+  function readRarity(element, printedId, sectionRarity) {
+    for (const image of queryAll(element, "img.card")) {
+      const alt = cleanText(getAttribute(image, "alt"));
+      const index = alt.indexOf(printedId);
+      if (index < 0) continue;
+      const token = alt.slice(index + printedId.length).trim().split(" ")[0];
+      const rarity = normalizeRarity(token);
+      if (rarity) return rarity;
+    }
+    return sectionRarity ?? null;
+  }
+  function readSectionRarity(heading) {
+    const match = /^(\S+)\s+Card List$/iu.exec(nodeText(heading));
+    return match ? normalizeRarity(match[1]) : null;
+  }
   function readDetailUrl(element) {
     const link = queryOne(element, 'a[href*="/sell/ws/card/"]');
     return getAttribute(link, "href")?.trim() || null;
@@ -438,7 +415,7 @@
       field
     };
   }
-  function parseProductElementDetailed(element) {
+  function parseProductElementDetailed(element, sectionRarity = null) {
     if (!element) return { product: null, error: requiredFieldError("card-product") };
     const gid = readField(element, ".cart_gid");
     const ver = readField(element, ".cart_ver");
@@ -486,6 +463,7 @@
     const product = {
       printedId,
       normalizedId: normalizePrintedId2(printedId),
+      rarity: readRarity(element, printedId, sectionRarity),
       name: nodeText(queryOne(element, "h4")),
       gid: String(gid),
       ver: String(ver),
@@ -640,7 +618,13 @@
     return root;
   }
   function collectCardProducts(document2) {
-    return queryAll(document2, ".card-product");
+    const cards = [];
+    let sectionRarity = null;
+    for (const element of queryAll(document2, "h3, .card-product")) {
+      if (hasClass(element, "card-product")) cards.push({ element, sectionRarity });
+      else sectionRarity = readSectionRarity(element);
+    }
+    return cards;
   }
   function parseSearchResults(html, options = {}) {
     const source = String(html ?? "");
@@ -648,8 +632,8 @@
     const cardElements = collectCardProducts(document2);
     const products = [];
     const rejected = [];
-    for (const element of cardElements) {
-      const parsed = parseProductElementDetailed(element);
+    for (const { element, sectionRarity } of cardElements) {
+      const parsed = parseProductElementDetailed(element, sectionRarity);
       if (parsed.product) products.push(parsed.product);
       else rejected.push(parsed.error);
     }
@@ -710,11 +694,13 @@
     const requestedQuantity = validQuantity ? Number(rawQuantity) : Number(rawQuantity) || 0;
     const originals = value && typeof value === "object" && Array.isArray(value.originalIds) ? value.originalIds.map((id) => String(id)) : printedId ? [printedId] : [];
     const condition = value && typeof value === "object" && typeof value.condition === "string" ? value.condition : null;
+    const rarity = value && typeof value === "object" ? normalizeRarity(value.rarity) : null;
     return {
       originalId: printedId || originals[0] || String(value?.normalizedId ?? ""),
       originalIds: originals,
       normalizedId,
       ...condition ? { condition } : {},
+      ...rarity ? { rarity } : {},
       requestedQuantity,
       sourceLines: sourceLines(value),
       inputIndex: index,
@@ -749,7 +735,7 @@
         invalidWithoutId.push(request);
         return;
       }
-      const key = `${request.normalizedId}:${request.condition ?? ""}`;
+      const key = `${request.normalizedId}:${request.condition ?? ""}:${request.rarity ?? ""}`;
       const existing = byId.get(key);
       byId.set(key, mergeRequest(existing, request));
     });
@@ -996,6 +982,7 @@
       status,
       reason: status === "ready" ? null : status === "partial" ? "PRODUCT_PARTIAL_STOCK" : "PRODUCT_SOLD_OUT",
       canonicalPrintedId: product.printedId,
+      rarity: product.rarity ?? null,
       condition: product.condition || (product.kizu === "0" ? "normal" : "damaged"),
       kizu: product.kizu,
       product,
@@ -1014,12 +1001,53 @@
     const status = soldOut ? "sold-out" : plannedQuantity < requestedQuantity ? "partial" : "ready";
     return buildRow(request, product, plannedQuantity, numbers.stock, status);
   }
+  function isResolvedRow(row) {
+    return row.status === "ready" || row.status === "partial";
+  }
+  function asRarityOption(row) {
+    if (!row.product) return row;
+    return {
+      ...row,
+      status: row.status === "sold-out" ? "sold-out" : "option",
+      reason: row.status === "sold-out" ? "PRODUCT_SOLD_OUT" : "PRODUCT_OTHER_RARITY",
+      plannedQuantity: 0,
+      selected: false
+    };
+  }
+  function groupByRarity(candidates) {
+    const groups = /* @__PURE__ */ new Map();
+    for (const candidate of candidates) {
+      const rarity = normalizeRarity(candidate.rarity);
+      if (!groups.has(rarity)) groups.set(rarity, []);
+      groups.get(rarity).push(candidate);
+    }
+    return [...groups].map(([rarity, products]) => ({ rarity, products }));
+  }
   function makeRows(request, candidates, options = {}) {
     if (request.invalid) return [makeInvalidRow(request)];
     const exact = candidates ?? [];
     if (exact.length === 0) {
       return [makeMissingRow(request)];
     }
+    if (request.rarity) {
+      const matching = exact.filter((c) => normalizeRarity(c.rarity) === request.rarity);
+      if (matching.length === 0) return [makeMissingRow(request, "PRODUCT_RARITY_MISSING")];
+      return makeConditionRows(request, matching, options);
+    }
+    const groups = groupByRarity(exact);
+    if (groups.length === 1) return makeConditionRows(request, exact, options);
+    if (groups.some((group) => group.rarity == null)) return [makeAmbiguousRow(request, exact)];
+    const rowsByGroup = groups.map((group) => makeConditionRows(request, group.products, options));
+    const primaryIndex = Math.max(0, rowsByGroup.findIndex((rows) => rows.some(isResolvedRow)));
+    const rarities = groups.map((group) => group.rarity);
+    return rowsByGroup.flatMap(
+      (rows, index) => rows.filter((row) => index === primaryIndex || row.status !== "missing").map((row) => ({
+        ...index === primaryIndex ? row : asRarityOption(row),
+        otherRarities: rarities.filter((rarity) => rarity !== groups[index].rarity)
+      }))
+    );
+  }
+  function makeConditionRows(request, exact, options) {
     const normal = exact.filter((c) => String(c.kizu).trim() === "0");
     const damaged = exact.filter((c) => String(c.kizu).trim() !== "0");
     const preference = options.conditionPreference || "prefer-damaged";
@@ -1771,11 +1799,13 @@ a { color: #175cd3; }
   }
   function statusReason(row) {
     const cond = row.condition === "damaged" ? "damaged" : "normal";
+    const also = row.otherRarities?.length ? ` (also sold as ${row.otherRarities.join(", ")})` : "";
     const messages = {
-      ready: "Ready",
+      ready: `Ready${also}`,
+      option: `Same ID in another rarity${also}; set a quantity to add`,
       partial: `Requested ${row.requestedQuantity}; adding ${row.plannedQuantity}`,
       "sold-out": `Card is sold out in ${cond} condition`,
-      missing: "No exact card found",
+      missing: row.reason === "PRODUCT_RARITY_MISSING" ? `No ${row.rarity} product for this ID` : "No exact card found",
       ambiguous: "Multiple exact products found; skipped",
       invalid: row.reason || "Invalid input"
     };
@@ -1840,7 +1870,7 @@ a { color: #175cd3; }
     function showInput(saved = "", savedPref = "prefer-damaged") {
       adding = false;
       cancelRequested = false;
-      const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2 damaged" });
+      const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2 damaged\nRZ/SE35-01 1 S-RR" });
       input.value = saved;
       const prefSelect = el(
         "select",
@@ -1872,7 +1902,7 @@ a { color: #175cd3; }
       });
       setView(
         el("p", { className: "warning", text: "Quantities below will be added to anything already in your cart." }),
-        el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged' (or 1) for damaged copies. Lines beginning with # are ignored." }),
+        el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged' (or 1) for damaged copies, and a rarity such as RR or S-RR when an ID is sold in more than one. Lines beginning with # are ignored." }),
         el("label", { for: "yyt-condition-preference", text: "Condition preference" }, prefSelect),
         el("label", { for: "yyt-card-list", text: "Card IDs and quantities" }, input),
         errorBox,
@@ -1914,7 +1944,7 @@ a { color: #175cd3; }
       }
     }
     function showReview(rows, source, conditionPreference = "prefer-damaged") {
-      const isRowSelectable = (r) => (r.status === "ready" || r.status === "partial") && (r.stock ?? r.availableStock ?? 0) > 0;
+      const isRowSelectable = (r) => (r.status === "ready" || r.status === "partial" || r.status === "option") && (r.stock ?? r.availableStock ?? 0) > 0;
       for (const row of rows) {
         if (typeof row.selected !== "boolean") {
           row.selected = isRowSelectable(row) && row.plannedQuantity > 0;
@@ -1999,6 +2029,7 @@ a { color: #175cd3; }
             el("td", {}, checkbox),
             el("td", { text: row.requestedId || row.originalIds?.[0] || "\u2014" }),
             el("td", { text: row.printedId || "\u2014" }),
+            el("td", { text: row.rarity || "\u2014" }),
             el("td", {}, condBadge),
             el("td", { text: row.name || "\u2014" }),
             el("td", { className: "num", text: Number.isFinite(row.priceYen) ? yen.format(row.priceYen) : "\u2014" }),
@@ -2012,7 +2043,7 @@ a { color: #175cd3; }
       const table = el(
         "table",
         {},
-        el("thead", {}, el("tr", {}, ...["Use", "Requested ID", "YYT ID", "Cond.", "Name", "Price", "Requested", "Stock", "Adding", "Status"].map((x) => el("th", { text: x })))),
+        el("thead", {}, el("tr", {}, ...["Use", "Requested ID", "YYT ID", "Rarity", "Cond.", "Name", "Price", "Requested", "Stock", "Adding", "Status"].map((x) => el("th", { text: x })))),
         tbody
       );
       submit.addEventListener("click", async () => {
@@ -2023,7 +2054,7 @@ a { color: #175cd3; }
       update();
       setView(
         el("h3", { text: "Review matches & allocate quantities" }),
-        el("p", { className: "warning", text: "Quantities will be added to the existing cart. Adjust Normal vs Damaged quantities as desired." }),
+        el("p", { className: "warning", text: "Quantities will be added to the existing cart. Adjust quantities across conditions and rarities as desired." }),
         el("div", { className: "table-wrap" }, table),
         el("div", { className: "summary" }, countText, totalText),
         el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source, conditionPreference) }), submit)
@@ -2064,7 +2095,7 @@ a { color: #175cd3; }
           for (const pending of chosen.slice(index)) results.push({ row: pending, outcome: "skipped", message: "Cancelled before request" });
           break;
         }
-        current.textContent = `Adding ${row.printedId} (${index + 1} of ${chosen.length})\u2026`;
+        current.textContent = `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${chosen.length})\u2026`;
         let result;
         try {
           result = await addItem(row, token, { signal: addController.signal });
@@ -2097,14 +2128,14 @@ a { color: #175cd3; }
         if (!matches.length) return null;
         const list = el("ul");
         for (const result of matches) {
-          const cond = result.row?.condition ? ` [${result.row.condition}]` : "";
+          const cond = [result.row?.rarity, result.row?.condition].filter(Boolean).map((x) => ` [${x}]`).join("");
           list.append(el("li", { text: `${result.row?.printedId || result.row?.requestedId || "Batch"}${cond}: ${result.message || key}` }));
         }
         return el("section", { className: "result-group" }, el("h3", { text: `${label} (${matches.length})` }), list);
       }).filter(Boolean);
       const hasUnknown = combined.some((r) => r.outcome === "unknown");
       const report = groups.flatMap(([key, label]) => combined.filter((r) => r.outcome === key).map((r) => {
-        const cond = r.row?.condition ? ` [${r.row.condition}]` : "";
+        const cond = [r.row?.rarity, r.row?.condition].filter(Boolean).map((x) => ` [${x}]`).join("");
         return `${label}: ${r.row?.printedId || r.row?.requestedId || "Batch"}${cond} \u2014 ${r.message || key}`;
       })).join("\n");
       const copy = el("button", { type: "button", text: "Copy report", onClick: async (event) => {

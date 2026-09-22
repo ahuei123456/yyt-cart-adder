@@ -36,7 +36,15 @@ Kka/W102-005SEC damaged
   - **Damaged condition only**
 - **Disambiguation in Review**: When both normal and damaged copies are available, both options appear in the review table. You can freely adjust the quantity input for normal and damaged cards to specify exactly how many of each condition to add.
 
-Quantities must be integers from 1 through 99. Duplicate lines for the same card and condition are aggregated. Review every resolved line before adding it.
+### Rarity
+
+Some sets list two products under one printed ID. On RZ/SE35, for example, `RZ/SE35-01` is sold as both RR and the S-RR holo. You don't need to say which one you want:
+
+- The quantity goes to the first rarity YYT lists that has stock (normally the base rarity).
+- Every other rarity for that ID shows in the review table with quantity 0. Raise it there to add copies of that rarity instead of, or as well as, the first one.
+- To choose up front, add the rarity in uppercase: `RZ/SE35-01 2 S-RR` or `RZ/SE35-01,1,damaged,RR`. Only that rarity is then matched.
+
+Quantities must be integers from 1 through 99. Duplicate lines for the same card, condition and rarity are aggregated. Review every resolved line before adding it.
 
 ## Development
 

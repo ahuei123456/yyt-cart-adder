@@ -177,7 +177,8 @@ If normal stock is unavailable, mark the line unavailable. Do not look up or sub
 - Require equality of the complete printed ID, including rarity/suffix.
 - Never use substring matching to select a product.
 - Never substitute a base rarity, parallel rarity, reprint, or similarly numbered card.
-- If more than one product has the same normalized printed ID, mark it `ambiguous` and skip it.
+- If more than one product has the same normalized printed ID, separate them by rarity (see below); if they cannot be separated, mark the ID `ambiguous` and skip it.
+- Some sets (for example RZ/SE35) sell every ID as a base rarity and an `S-` holo parallel with the same printed ID. The requested quantity goes to the first listed rarity that can fill it; each other rarity appears as a zero-quantity `option` row to raise in review. A rarity typed in the input (`RZ/SE35-01 2 S-RR`) restricts matching to that rarity.
 
 ### 3.5 Stock policy
 
@@ -417,7 +418,7 @@ For each `.card-product`:
 6. Treat `.sold-out`, zero `cart_active`, or zero `cart_limit` as unavailable.
 7. Reject any result where `kizu !== "0"` in the MVP.
 
-Do not rely on card list headings or rarity labels to establish identity. The complete printed ID is authoritative.
+Do not rely on card list headings or rarity labels to establish identity. The complete printed ID is authoritative. The rarity (the token after the ID in the image alt, else the `… Card List` heading) is used only to separate products that already share an exact printed ID.
 
 If the page returns HTTP 200 but required product structure is absent for every expected exact result, show a site-structure error rather than reporting every card as casually missing. This distinction will make site breakages diagnosable.
 

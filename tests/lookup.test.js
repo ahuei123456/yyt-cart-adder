@@ -207,3 +207,64 @@ test("respects explicit damaged condition request while keeping normal option av
   assert.equal(normal.plannedQuantity, 0);
   assert.equal(normal.selected, false);
 });
+
+test("adds to the first listed rarity and offers the other rarity at zero", async () => {
+  const mock = fakeFetch({ "RZ/SE35": fixture("search-dual-rarity.html") });
+  const result = await lookupProducts(
+    [{ originalId: "RZ/SE35-01", requestedQuantity: 2, sourceLines: [1] }],
+    { fetch: mock.fetch, delayMs: 0 },
+  );
+
+  assert.deepEqual(
+    result.rows.map((r) => [r.rarity, r.status, r.plannedQuantity, r.selected, r.availableStock]),
+    [
+      ["RR", "ready", 2, true, 7],
+      ["S-RR", "option", 0, false, 1],
+    ],
+  );
+  assert.deepEqual(result.rows[0].otherRarities, ["S-RR"]);
+  assert.deepEqual(result.rows[1].otherRarities, ["RR"]);
+});
+
+test("moves the requested quantity to another rarity when the first is sold out", async () => {
+  const html = fixture("search-dual-rarity.html")
+    .replace(/value="7"(\s+)class="cart_limit"/, 'value="0"$1class="cart_limit"')
+    .replace(/value="7"(\s+)class="cart_active"/, 'value="0"$1class="cart_active"');
+  const mock = fakeFetch({ "RZ/SE35": html });
+  const result = await lookupProducts(["RZ/SE35-01"], { fetch: mock.fetch, delayMs: 0 });
+
+  assert.deepEqual(
+    result.rows.map((r) => [r.rarity, r.status, r.plannedQuantity]),
+    [
+      ["RR", "sold-out", 0],
+      ["S-RR", "ready", 1],
+    ],
+  );
+});
+
+test("an explicit rarity restricts matching to that rarity", async () => {
+  const mock = fakeFetch({ "RZ/SE35": fixture("search-dual-rarity.html") });
+  const result = await lookupProducts(
+    [
+      { originalId: "RZ/SE35-02", requestedQuantity: 3, rarity: "s-rr", sourceLines: [1] },
+      { originalId: "RZ/SE35-01", requestedQuantity: 1, rarity: "SP", sourceLines: [2] },
+    ],
+    { fetch: mock.fetch, delayMs: 0 },
+  );
+
+  assert.equal(result.rows.length, 2);
+  assert.equal(result.rows[0].rarity, "S-RR");
+  assert.equal(result.rows[0].product.cid, "10004");
+  assert.equal(result.rows[0].status, "ready");
+  assert.equal(result.rows[0].plannedQuantity, 3);
+  assert.equal(result.rows[1].status, "missing");
+  assert.equal(result.rows[1].reason, "PRODUCT_RARITY_MISSING");
+});
+
+test("IDs sold in one rarity resolve to a single row", async () => {
+  const mock = fakeFetch({ "RZ/SE35": fixture("search-dual-rarity.html") });
+  const result = await lookupProducts(["RZ/SE35-02SP"], { fetch: mock.fetch, delayMs: 0 });
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].status, "ready");
+  assert.equal(result.rows[0].otherRarities, undefined);
+});

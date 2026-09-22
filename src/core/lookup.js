@@ -1,5 +1,6 @@
 import {
   normalizePrintedId,
+  normalizeRarity,
   parseSearchResults,
 } from "./parser.js";
 import { ERROR_CODES, YytError } from "./errors.js";
@@ -77,12 +78,15 @@ function makeRequest(value, index) {
     value && typeof value === "object" && typeof value.condition === "string"
       ? value.condition
       : null;
+  const rarity =
+    value && typeof value === "object" ? normalizeRarity(value.rarity) : null;
 
   return {
     originalId: printedId || originals[0] || String(value?.normalizedId ?? ""),
     originalIds: originals,
     normalizedId,
     ...(condition ? { condition } : {}),
+    ...(rarity ? { rarity } : {}),
     requestedQuantity,
     sourceLines: sourceLines(value),
     inputIndex: index,
@@ -128,7 +132,7 @@ function normalizeRequests(requests) {
       invalidWithoutId.push(request);
       return;
     }
-    const key = `${request.normalizedId}:${request.condition ?? ""}`;
+    const key = `${request.normalizedId}:${request.condition ?? ""}:${request.rarity ?? ""}`;
     const existing = byId.get(key);
     byId.set(key, mergeRequest(existing, request));
   });
@@ -464,6 +468,7 @@ function buildRow(request, product, plannedQuantity, stock, statusOverride = nul
           ? "PRODUCT_PARTIAL_STOCK"
           : "PRODUCT_SOLD_OUT",
     canonicalPrintedId: product.printedId,
+    rarity: product.rarity ?? null,
     condition: product.condition || (product.kizu === "0" ? "normal" : "damaged"),
     kizu: product.kizu,
     product,
@@ -485,6 +490,44 @@ function makeSingleRow(request, product, requestedQuantity) {
   return buildRow(request, product, plannedQuantity, numbers.stock, status);
 }
 
+function isResolvedRow(row) {
+  return row.status === "ready" || row.status === "partial";
+}
+
+/**
+ * Turn a resolved row for a non-default rarity into a zero-quantity option
+ * the user can raise in review.  Nothing is added unless they do.
+ */
+function asRarityOption(row) {
+  if (!row.product) return row;
+  return {
+    ...row,
+    status: row.status === "sold-out" ? "sold-out" : "option",
+    reason: row.status === "sold-out" ? "PRODUCT_SOLD_OUT" : "PRODUCT_OTHER_RARITY",
+    plannedQuantity: 0,
+    selected: false,
+  };
+}
+
+function groupByRarity(candidates) {
+  const groups = new Map();
+  for (const candidate of candidates) {
+    const rarity = normalizeRarity(candidate.rarity);
+    if (!groups.has(rarity)) groups.set(rarity, []);
+    groups.get(rarity).push(candidate);
+  }
+  return [...groups].map(([rarity, products]) => ({ rarity, products }));
+}
+
+/**
+ * Build review rows for one request.
+ *
+ * Most IDs map to one rarity, so the condition logic runs unchanged.  When an
+ * ID is sold in several rarities (RR and its S-RR holo, for example), the
+ * requested quantity goes to the first rarity YYT lists that can fill it, and
+ * every other rarity is offered as a zero-quantity row to correct in review.
+ * An explicit rarity in the input restricts matching to that rarity.
+ */
 export function makeRows(request, candidates, options = {}) {
   if (request.invalid) return [makeInvalidRow(request)];
 
@@ -493,6 +536,32 @@ export function makeRows(request, candidates, options = {}) {
     return [makeMissingRow(request)];
   }
 
+  if (request.rarity) {
+    const matching = exact.filter((c) => normalizeRarity(c.rarity) === request.rarity);
+    if (matching.length === 0) return [makeMissingRow(request, "PRODUCT_RARITY_MISSING")];
+    return makeConditionRows(request, matching, options);
+  }
+
+  const groups = groupByRarity(exact);
+  if (groups.length === 1) return makeConditionRows(request, exact, options);
+  // Products share an ID but at least one has no readable rarity, so there is
+  // no label to tell them apart.
+  if (groups.some((group) => group.rarity == null)) return [makeAmbiguousRow(request, exact)];
+
+  const rowsByGroup = groups.map((group) => makeConditionRows(request, group.products, options));
+  const primaryIndex = Math.max(0, rowsByGroup.findIndex((rows) => rows.some(isResolvedRow)));
+  const rarities = groups.map((group) => group.rarity);
+  return rowsByGroup.flatMap((rows, index) =>
+    rows
+      .filter((row) => index === primaryIndex || row.status !== "missing")
+      .map((row) => ({
+        ...(index === primaryIndex ? row : asRarityOption(row)),
+        otherRarities: rarities.filter((rarity) => rarity !== groups[index].rarity),
+      })),
+  );
+}
+
+function makeConditionRows(request, exact, options) {
   const normal = exact.filter((c) => String(c.kizu).trim() === "0");
   const damaged = exact.filter((c) => String(c.kizu).trim() !== "0");
   const preference = options.conditionPreference || "prefer-damaged";
