@@ -353,3 +353,15 @@ test("keeps only the first of repeated option rows", async () => {
     ],
   );
 });
+
+test("an unused fallback condition is shown as an option", async () => {
+  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const result = await lookupProducts(["Kka/W102-005SEC"], { fetch: mock.fetch, delayMs: 0 });
+  assert.deepEqual(
+    result.rows.map((r) => [r.condition, r.status, r.reason, r.plannedQuantity]),
+    [
+      ["normal", "ready", null, 1],
+      ["damaged", "option", "PRODUCT_OTHER_CONDITION", 0],
+    ],
+  );
+});

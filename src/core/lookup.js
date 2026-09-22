@@ -638,7 +638,9 @@ function makeConditionRows(request, exact, options) {
       damagedRow.selected = damagedPlanned > 0;
       const normalRow = buildRow(request, normal[0], normalPlanned, normalStock, normalStatus);
       normalRow.selected = normalPlanned > 0;
-      return [damagedRow, normalRow];
+      // A fallback the preferred condition fully covered adds nothing; show
+      // it like any other zero-quantity option.
+      return [damagedRow, normalPlanned > 0 ? normalRow : asOption(normalRow, "PRODUCT_OTHER_CONDITION")];
     } else {
       // prefer-normal
       const normalPlanned = Math.min(totalRequested, normalStock);
@@ -651,7 +653,7 @@ function makeConditionRows(request, exact, options) {
       normalRow.selected = normalPlanned > 0;
       const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
       damagedRow.selected = damagedPlanned > 0;
-      return [normalRow, damagedRow];
+      return [normalRow, damagedPlanned > 0 ? damagedRow : asOption(damagedRow, "PRODUCT_OTHER_CONDITION")];
     }
   }
 
