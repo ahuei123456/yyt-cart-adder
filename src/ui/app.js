@@ -152,6 +152,8 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     }
     const tbody = el("tbody");
     const countText = el("strong");
+    const overWarning = el("div", { className: "warning", hidden: true });
+    const rowElements = new Map();
     const totalText = el("span");
     const submit = el("button", { className: "primary", type: "button" });
 
@@ -169,6 +171,25 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
         desc += ` (all ${damagedCards} damaged)`;
       }
       countText.textContent = desc;
+
+      // A request can be split across conditions and rarities; flag it when
+      // the rows together add more copies than were asked for.
+      const byRequest = new Map();
+      for (const r of rows) {
+        if (!Number.isInteger(r.inputIndex)) continue;
+        if (!byRequest.has(r.inputIndex)) byRequest.set(r.inputIndex, []);
+        byRequest.get(r.inputIndex).push(r);
+      }
+      const over = [];
+      for (const group of byRequest.values()) {
+        const adding = group.filter((r) => r.selected).reduce((n, r) => n + (r.plannedQuantity || 0), 0);
+        const requested = group[0].requestedQuantity || 0;
+        const isOver = group.length > 1 && adding > requested;
+        for (const r of group) rowElements.get(r)?.classList.toggle("over", isOver);
+        if (isOver) over.push(`${group[0].requestedId || group[0].originalId}: adding ${adding}, requested ${requested}`);
+      }
+      overWarning.hidden = !over.length;
+      overWarning.textContent = over.length ? `More copies than requested:\n${over.join("\n")}` : "";
       totalText.textContent = `Estimated selected total: ${yen.format(total)}`;
       submit.textContent = `Add ${totalCards} cards from ${chosen.length} products`;
       submit.disabled = !chosen.length;
@@ -230,21 +251,24 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
           })
         : el("span", { text: "—" });
 
-      tbody.append(
-        el("tr", { className: row.status === "partial" ? "partial" : selectable ? "" : "unavailable" },
-          el("td", {}, checkbox),
-          el("td", { text: row.requestedId || row.originalIds?.[0] || "—" }),
-          el("td", { text: row.printedId || "—" }),
-          el("td", { text: row.rarity || "—" }),
-          el("td", {}, condBadge),
-          el("td", { text: row.name || "—" }),
-          el("td", { className: "num", text: Number.isFinite(row.priceYen) ? yen.format(row.priceYen) : "—" }),
-          el("td", { className: "num", text: String(row.requestedQuantity || "—") }),
-          el("td", { className: "num", text: Number.isFinite(stock) ? String(stock) : "—" }),
-          addingCell,
-          el("td", { className: "status", text: statusReason(row) }),
-        )
+      const isOption = row.status === "option";
+      const tr = el("tr", { className: [row.status === "partial" ? "partial" : selectable ? "" : "unavailable", isOption ? "alt" : ""].filter(Boolean).join(" ") },
+        el("td", {}, checkbox),
+        el("td", { text: row.requestedId || row.originalIds?.[0] || "—" }),
+        el("td", { text: row.printedId || "—" }),
+        el("td", { className: "rarity", text: row.rarity ? `${isOption ? "↳ " : ""}${row.rarity}` : "—" }),
+        el("td", {}, condBadge),
+        el("td", { text: row.name || "—" }),
+        el("td", { className: "num", text: Number.isFinite(row.priceYen) ? yen.format(row.priceYen) : "—" }),
+        // The requested quantity belongs to the primary row; repeating it on
+        // another-rarity rows would read as a second request.
+        el("td", { className: "num", text: isOption ? "—" : String(row.requestedQuantity || "—") }),
+        el("td", { className: "num", text: Number.isFinite(stock) ? String(stock) : "—" }),
+        addingCell,
+        el("td", { className: "status", text: statusReason(row) }),
       );
+      rowElements.set(row, tr);
+      tbody.append(tr);
     }
 
     const table = el("table", {},
@@ -259,6 +283,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
       el("h3", { text: "Review matches & allocate quantities" }),
       el("p", { className: "warning", text: "Quantities will be added to the existing cart. Adjust quantities across conditions and rarities as desired." }),
       el("div", { className: "table-wrap" }, table),
+      overWarning,
       el("div", { className: "summary" }, countText, totalText),
       el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source, conditionPreference) }), submit),
     );

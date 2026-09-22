@@ -1751,7 +1751,8 @@ h3 { margin-bottom: 10px; font-size: 17px; }
 .body { padding: 20px; }
 .view { display: grid; gap: 16px; }
 .hint { color: #475467; }
-.warning { padding: 10px 12px; border-left: 4px solid #b54708; background: #fff4e8; font-weight: 650; }
+.warning { padding: 10px 12px; border-left: 4px solid #b54708; background: #fff4e8; font-weight: 650; white-space: pre-wrap; }
+.warning[hidden] { display: none; }
 .error { padding: 10px 12px; border-left: 4px solid #b42318; background: #fef3f2; color: #912018; white-space: pre-wrap; }
 label { display: grid; gap: 7px; font-weight: 650; }
 textarea { width: 100%; min-height: 220px; resize: vertical; border: 1px solid #98a2b3; border-radius: 8px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-weight: 400; }
@@ -1768,6 +1769,11 @@ th, td { padding: 9px; border-bottom: 1px solid #e4e7ec; text-align: left; verti
 th { background: #f7f9fc; white-space: nowrap; }
 tr.partial { background: #fff8e8; }
 tr.unavailable { color: #667085; background: #f8fafc; }
+tr.alt { background: #f5f8ff; }
+tr.alt td:first-child { box-shadow: inset 3px 0 #84adff; }
+td.rarity { white-space: nowrap; }
+tr.alt td.rarity { padding-left: 14px; }
+tr.over { background: #fef3f2; }
 .num { text-align: right; white-space: nowrap; }
 .status { font-weight: 700; }
 .summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding: 12px; border-radius: 8px; background: #f1f5f9; }
@@ -1952,6 +1958,8 @@ a { color: #175cd3; }
       }
       const tbody = el("tbody");
       const countText = el("strong");
+      const overWarning = el("div", { className: "warning", hidden: true });
+      const rowElements = /* @__PURE__ */ new Map();
       const totalText = el("span");
       const submit = el("button", { className: "primary", type: "button" });
       const update = () => {
@@ -1967,6 +1975,23 @@ a { color: #175cd3; }
           desc += ` (all ${damagedCards} damaged)`;
         }
         countText.textContent = desc;
+        const byRequest = /* @__PURE__ */ new Map();
+        for (const r of rows) {
+          if (!Number.isInteger(r.inputIndex)) continue;
+          if (!byRequest.has(r.inputIndex)) byRequest.set(r.inputIndex, []);
+          byRequest.get(r.inputIndex).push(r);
+        }
+        const over = [];
+        for (const group of byRequest.values()) {
+          const adding2 = group.filter((r) => r.selected).reduce((n, r) => n + (r.plannedQuantity || 0), 0);
+          const requested = group[0].requestedQuantity || 0;
+          const isOver = group.length > 1 && adding2 > requested;
+          for (const r of group) rowElements.get(r)?.classList.toggle("over", isOver);
+          if (isOver) over.push(`${group[0].requestedId || group[0].originalId}: adding ${adding2}, requested ${requested}`);
+        }
+        overWarning.hidden = !over.length;
+        overWarning.textContent = over.length ? `More copies than requested:
+${over.join("\n")}` : "";
         totalText.textContent = `Estimated selected total: ${yen.format(total)}`;
         submit.textContent = `Add ${totalCards} cards from ${chosen.length} products`;
         submit.disabled = !chosen.length;
@@ -2022,23 +2047,26 @@ a { color: #175cd3; }
           className: `badge badge-${row.condition}`,
           text: row.condition === "damaged" ? "Damaged" : "Normal"
         }) : el("span", { text: "\u2014" });
-        tbody.append(
-          el(
-            "tr",
-            { className: row.status === "partial" ? "partial" : selectable ? "" : "unavailable" },
-            el("td", {}, checkbox),
-            el("td", { text: row.requestedId || row.originalIds?.[0] || "\u2014" }),
-            el("td", { text: row.printedId || "\u2014" }),
-            el("td", { text: row.rarity || "\u2014" }),
-            el("td", {}, condBadge),
-            el("td", { text: row.name || "\u2014" }),
-            el("td", { className: "num", text: Number.isFinite(row.priceYen) ? yen.format(row.priceYen) : "\u2014" }),
-            el("td", { className: "num", text: String(row.requestedQuantity || "\u2014") }),
-            el("td", { className: "num", text: Number.isFinite(stock) ? String(stock) : "\u2014" }),
-            addingCell,
-            el("td", { className: "status", text: statusReason(row) })
-          )
+        const isOption = row.status === "option";
+        const tr = el(
+          "tr",
+          { className: [row.status === "partial" ? "partial" : selectable ? "" : "unavailable", isOption ? "alt" : ""].filter(Boolean).join(" ") },
+          el("td", {}, checkbox),
+          el("td", { text: row.requestedId || row.originalIds?.[0] || "\u2014" }),
+          el("td", { text: row.printedId || "\u2014" }),
+          el("td", { className: "rarity", text: row.rarity ? `${isOption ? "\u21B3 " : ""}${row.rarity}` : "\u2014" }),
+          el("td", {}, condBadge),
+          el("td", { text: row.name || "\u2014" }),
+          el("td", { className: "num", text: Number.isFinite(row.priceYen) ? yen.format(row.priceYen) : "\u2014" }),
+          // The requested quantity belongs to the primary row; repeating it on
+          // another-rarity rows would read as a second request.
+          el("td", { className: "num", text: isOption ? "\u2014" : String(row.requestedQuantity || "\u2014") }),
+          el("td", { className: "num", text: Number.isFinite(stock) ? String(stock) : "\u2014" }),
+          addingCell,
+          el("td", { className: "status", text: statusReason(row) })
         );
+        rowElements.set(row, tr);
+        tbody.append(tr);
       }
       const table = el(
         "table",
@@ -2056,6 +2084,7 @@ a { color: #175cd3; }
         el("h3", { text: "Review matches & allocate quantities" }),
         el("p", { className: "warning", text: "Quantities will be added to the existing cart. Adjust quantities across conditions and rarities as desired." }),
         el("div", { className: "table-wrap" }, table),
+        overWarning,
         el("div", { className: "summary" }, countText, totalText),
         el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source, conditionPreference) }), submit)
       );
