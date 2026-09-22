@@ -27,14 +27,15 @@ Kka/W102-005SEC damaged
 # comments and blank lines are ignored
 ```
 
-### Condition Preference & Disambiguation
+### Condition
 
-- **Global Selector**: Choose your preference on the input screen:
-  - **Prefer damaged, fall back to normal** (default)
-  - **Prefer normal, fall back to damaged**
-  - **Normal condition only**
-  - **Damaged condition only**
-- **Disambiguation in Review**: When both normal and damaged copies are available, both options appear in the review table. You can freely adjust the quantity input for normal and damaged cards to specify exactly how many of each condition to add.
+The **Condition for lines without one** setting on the input screen applies only to lines that don't name a condition:
+
+- **Normal first, damaged if not enough stock** (default): fills from normal copies and takes the rest from damaged only if normal stock runs short.
+- **Damaged first, normal if not enough stock**: the same, starting with damaged copies.
+- **Normal only** / **Damaged only**: uses only that condition.
+
+A condition on the line (`damaged`/`1` or `normal`/`0`) always overrides the setting. With a condition on the line or an "only" setting, nothing is taken automatically from the other condition. If the ID also has copies in the other condition, they appear in the review table at quantity 0 so you can take them there instead.
 
 ### Rarity
 

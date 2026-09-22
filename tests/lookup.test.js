@@ -268,3 +268,51 @@ test("IDs sold in one rarity resolve to a single row", async () => {
   assert.equal(result.rows[0].status, "ready");
   assert.equal(result.rows[0].otherRarities, undefined);
 });
+
+test("defaults to normal first when no preference is given", async () => {
+  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const result = await lookupProducts(["Kka/W102-005SEC"], { fetch: mock.fetch, delayMs: 0 });
+  assert.deepEqual(
+    result.rows.map((r) => [r.condition, r.plannedQuantity, r.selected]),
+    [
+      ["normal", 1, true],
+      ["damaged", 0, false],
+    ],
+  );
+});
+
+test("an -only preference still offers the other condition at zero", async () => {
+  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const result = await lookupProducts(
+    [{ originalId: "Kka/W102-005SEC", requestedQuantity: 4, sourceLines: [1] }],
+    { fetch: mock.fetch, delayMs: 0, conditionPreference: "normal-only" },
+  );
+  assert.deepEqual(
+    result.rows.map((r) => [r.condition, r.status, r.reason, r.plannedQuantity]),
+    [
+      ["normal", "partial", "PRODUCT_PARTIAL_STOCK", 2],
+      ["damaged", "option", "PRODUCT_OTHER_CONDITION", 0],
+    ],
+  );
+});
+
+test("a missing condition is reported with the other condition offered", async () => {
+  const mock = fakeFetch({ "Kka/W102": fixture("search-exact.html") });
+  const byPreference = await lookupProducts(
+    ["Kka/W102-005SEC"],
+    { fetch: mock.fetch, delayMs: 0, conditionPreference: "damaged-only" },
+  );
+  const byLine = await lookupProducts(
+    [{ originalId: "Kka/W102-005SEC", requestedQuantity: 1, condition: "damaged" }],
+    { fetch: mock.fetch, delayMs: 0, conditionPreference: "normal-only" },
+  );
+  for (const result of [byPreference, byLine]) {
+    assert.deepEqual(
+      result.rows.map((r) => [r.condition, r.status, r.reason, r.plannedQuantity]),
+      [
+        ["damaged", "missing", "PRODUCT_CONDITION_MISSING", 0],
+        ["normal", "option", "PRODUCT_OTHER_CONDITION", 0],
+      ],
+    );
+  }
+});

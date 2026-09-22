@@ -20,10 +20,16 @@ function statusReason(row) {
   const also = row.otherRarities?.length ? ` (also sold as ${row.otherRarities.join(", ")})` : "";
   const messages = {
     ready: `Ready${also}`,
-    option: `Same ID in another rarity${also}; set a quantity to add`,
+    option: row.reason === "PRODUCT_OTHER_CONDITION"
+      ? `${cond === "damaged" ? "Damaged" : "Normal"} copy; set a quantity to add`
+      : `Same ID in another rarity${also}; set a quantity to add`,
     partial: `Requested ${row.requestedQuantity}; adding ${row.plannedQuantity}`,
     "sold-out": `Card is sold out in ${cond} condition`,
-    missing: row.reason === "PRODUCT_RARITY_MISSING" ? `No ${row.rarity} product for this ID` : "No exact card found",
+    missing: row.reason === "PRODUCT_RARITY_MISSING"
+      ? `No ${row.rarity} product for this ID`
+      : row.reason === "PRODUCT_CONDITION_MISSING"
+        ? `No ${cond} copy for this ID`
+        : "No exact card found",
     ambiguous: "Multiple exact products found; skipped",
     invalid: row.reason || "Invalid input",
   };
@@ -80,16 +86,16 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     }
   });
 
-  function showInput(saved = "", savedPref = "prefer-damaged") {
+  function showInput(saved = "", savedPref = "prefer-normal") {
     adding = false;
     cancelRequested = false;
     const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2 damaged\nRZ/SE35-01 1 S-RR" });
     input.value = saved;
     const prefSelect = el("select", { id: "yyt-condition-preference", className: "select-pref" },
-      el("option", { value: "prefer-damaged", text: "Prefer damaged, fall back to normal" }),
-      el("option", { value: "prefer-normal", text: "Prefer normal, fall back to damaged" }),
-      el("option", { value: "normal-only", text: "Normal condition only" }),
-      el("option", { value: "damaged-only", text: "Damaged condition only" }),
+      el("option", { value: "prefer-normal", text: "Normal first, damaged if not enough stock" }),
+      el("option", { value: "prefer-damaged", text: "Damaged first, normal if not enough stock" }),
+      el("option", { value: "normal-only", text: "Normal only" }),
+      el("option", { value: "damaged-only", text: "Damaged only" }),
     );
     prefSelect.value = savedPref;
     const errorBox = el("div", { className: "error", hidden: true });
@@ -108,8 +114,8 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     });
     setView(
       el("p", { className: "warning", text: "Quantities below will be added to anything already in your cart." }),
-      el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged' (or 1) for damaged copies, and a rarity such as RR or S-RR when an ID is sold in more than one. Lines beginning with # are ignored." }),
-      el("label", { for: "yyt-condition-preference", text: "Condition preference" }, prefSelect),
+      el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged'/1 or 'normal'/0 to fix a line's condition (this overrides the setting above), and a rarity such as RR or S-RR when an ID is sold in more than one. Lines beginning with # are ignored." }),
+      el("label", { for: "yyt-condition-preference", text: "Condition for lines without one" }, prefSelect),
       el("label", { for: "yyt-card-list", text: "Card IDs and quantities" }, input),
       errorBox,
       el("div", { className: "actions" }, resolveButton),
@@ -117,7 +123,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     input.focus();
   }
 
-  async function showResolving(parsed, source, conditionPreference = "prefer-damaged") {
+  async function showResolving(parsed, source, conditionPreference = "prefer-normal") {
     lookupController = new AbortController();
     const message = el("p", { text: `Resolving ${parsed.requests.length} distinct card requests…` });
     const cancel = el("button", { type: "button", text: "Cancel", onClick: () => { lookupController.abort(); showInput(source, conditionPreference); } });
@@ -143,7 +149,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
     }
   }
 
-  function showReview(rows, source, conditionPreference = "prefer-damaged") {
+  function showReview(rows, source, conditionPreference = "prefer-normal") {
     const isRowSelectable = (r) => (r.status === "ready" || r.status === "partial" || r.status === "option") && (r.stock ?? r.availableStock ?? 0) > 0;
     for (const row of rows) {
       if (typeof row.selected !== "boolean") {

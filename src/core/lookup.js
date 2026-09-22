@@ -495,15 +495,16 @@ function isResolvedRow(row) {
 }
 
 /**
- * Turn a resolved row for a non-default rarity into a zero-quantity option
- * the user can raise in review.  Nothing is added unless they do.
+ * Turn a resolved row into a zero-quantity option the user can raise in
+ * review, used for the other rarity or condition of a requested ID.  Nothing
+ * is added unless they do.
  */
-function asRarityOption(row) {
+function asOption(row, reason) {
   if (!row.product) return row;
   return {
     ...row,
     status: row.status === "sold-out" ? "sold-out" : "option",
-    reason: row.status === "sold-out" ? "PRODUCT_SOLD_OUT" : "PRODUCT_OTHER_RARITY",
+    reason: row.status === "sold-out" ? "PRODUCT_SOLD_OUT" : reason,
     plannedQuantity: 0,
     selected: false,
   };
@@ -555,7 +556,7 @@ export function makeRows(request, candidates, options = {}) {
     rows
       .filter((row) => index === primaryIndex || row.status !== "missing")
       .map((row) => ({
-        ...(index === primaryIndex ? row : asRarityOption(row)),
+        ...(index === primaryIndex ? row : asOption(row, "PRODUCT_OTHER_RARITY")),
         otherRarities: rarities.filter((rarity) => rarity !== groups[index].rarity),
       })),
   );
@@ -564,52 +565,28 @@ export function makeRows(request, candidates, options = {}) {
 function makeConditionRows(request, exact, options) {
   const normal = exact.filter((c) => String(c.kizu).trim() === "0");
   const damaged = exact.filter((c) => String(c.kizu).trim() !== "0");
-  const preference = options.conditionPreference || "prefer-damaged";
-  const reqCond = request.condition;
+  const preference = options.conditionPreference || "prefer-normal";
 
-  // If request explicitly asks for normal
-  if (reqCond === "normal") {
-    if (normal.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
-    if (normal.length > 1) return [makeAmbiguousRow(request, normal)];
-    const normalRow = makeSingleRow(request, normal[0], request.requestedQuantity);
-    if (damaged.length === 1) {
-      const damagedStock = numbersForProduct(damaged[0]).stock;
-      const damagedRow = buildRow(request, damaged[0], 0, damagedStock);
-      damagedRow.selected = false;
-      return [normalRow, damagedRow];
-    }
-    return [normalRow];
+  // A condition on the input line wins over the global setting; otherwise an
+  // "-only" setting names the condition.  Either way nothing is added
+  // automatically from the other condition, but it is shown at zero so the
+  // user can take it instead in review.
+  const strict =
+    request.condition ??
+    (preference === "normal-only" ? "normal" : preference === "damaged-only" ? "damaged" : null);
+  if (strict) {
+    const [wanted, other] = strict === "normal" ? [normal, damaged] : [damaged, normal];
+    if (wanted.length > 1) return [makeAmbiguousRow(request, wanted)];
+    const primary = wanted.length
+      ? makeSingleRow(request, wanted[0], request.requestedQuantity)
+      : { ...makeMissingRow(request, "PRODUCT_CONDITION_MISSING"), condition: strict };
+    if (other.length !== 1) return [primary];
+    const otherRow = buildRow(request, other[0], 0, numbersForProduct(other[0]).stock);
+    return [primary, asOption(otherRow, "PRODUCT_OTHER_CONDITION")];
   }
 
-  // If request explicitly asks for damaged
-  if (reqCond === "damaged") {
-    if (damaged.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
-    if (damaged.length > 1) return [makeAmbiguousRow(request, damaged)];
-    const damagedRow = makeSingleRow(request, damaged[0], request.requestedQuantity);
-    if (normal.length === 1) {
-      const normalStock = numbersForProduct(normal[0]).stock;
-      const normalRow = buildRow(request, normal[0], 0, normalStock);
-      normalRow.selected = false;
-      return [damagedRow, normalRow];
-    }
-    return [damagedRow];
-  }
-
-  // If preference is strict normal-only
-  if (preference === "normal-only") {
-    if (normal.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
-    if (normal.length > 1) return [makeAmbiguousRow(request, normal)];
-    return [makeSingleRow(request, normal[0], request.requestedQuantity)];
-  }
-
-  // If preference is strict damaged-only
-  if (preference === "damaged-only") {
-    if (damaged.length === 0) return [makeMissingRow(request, "PRODUCT_MISSING")];
-    if (damaged.length > 1) return [makeAmbiguousRow(request, damaged)];
-    return [makeSingleRow(request, damaged[0], request.requestedQuantity)];
-  }
-
-  // General preference: prefer-damaged or prefer-normal
+  // No condition given: prefer-normal or prefer-damaged fills from that
+  // condition first and takes the rest from the other when stock is short.
   if (normal.length > 1 || damaged.length > 1) {
     return [makeAmbiguousRow(request, exact)];
   }
