@@ -93,7 +93,7 @@ test("performs one grouped lookup and returns exact rows", async () => {
   assert.equal(result.rows[0].status, "ready");
   assert.equal(result.rows[0].plannedQuantity, 1);
   assert.equal(result.rows[1].status, "partial");
-  assert.equal(result.rows[1].availableStock, 4);
+  assert.equal(result.rows[1].stock, 4);
   assert.equal(result.rows[1].plannedQuantity, 4);
 });
 
@@ -272,7 +272,7 @@ test("adds to the first listed rarity and offers the other rarity at zero", asyn
   );
 
   assert.deepEqual(
-    result.rows.map((r) => [r.rarity, r.status, r.plannedQuantity, r.selected, r.availableStock]),
+    result.rows.map((r) => [r.rarity, r.status, r.plannedQuantity, r.selected, r.stock]),
     [
       ["RR", "ready", 2, true, 7],
       ["S-RR", "option", 0, false, 1],

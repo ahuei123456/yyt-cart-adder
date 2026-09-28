@@ -1,6 +1,6 @@
 {
   "name": "yyt-cart-adder",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Tampermonkey userscript for reviewing and adding Weiss Schwarz cards to a YYT cart.",
   "type": "module",

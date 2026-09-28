@@ -37,3 +37,7 @@ jobs:
             echo "dist/ changed but package.json is still at version $new"
             exit 1
           fi
+      - name: Check the changelog has an entry for this version
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          grep -qx "## $version" CHANGELOG.md || { echo "CHANGELOG.md has no '## $version' entry"; exit 1; }

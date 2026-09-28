@@ -113,19 +113,33 @@ test("marks duplicate aggregate overflow invalid", () => {
   assert.match(result.errors[0].message, /maximum of 99/);
 });
 
-test("groups shared prefixes into one query and separates fallback IDs", () => {
+test("groups shared prefixes into one query", () => {
   const { requests } = parseInput([
     "Kka/W102-005SEC 1",
     "KKA/W102-006SP 2",
     "SMP/W99-001R 1",
-    "UnusualCard 1",
   ].join("\n"));
 
   const plan = buildLookupPlan(requests);
   assert.deepEqual([...plan.groups.keys()], ["Kka/W102", "SMP/W99"]);
   assert.equal(plan.groups.get("Kka/W102").length, 2);
   assert.equal(plan.groups.get("SMP/W99").length, 1);
-  assert.deepEqual(plan.fallbackIds.map((request) => request.normalizedId), ["unusualcard"]);
+  assert.deepEqual(plan.fallbackIds, []);
+});
+
+test("rejects tokens that are not card IDs without searching for them", () => {
+  const result = parseInput([
+    "UnusualCard 1",
+    "W102-005 1",
+    "Kka/W102 1",
+    "Kka/W102-005.",
+    "4 Kka/W102-005",
+    "Kka/W102-005SEC 1",
+    "kka/w102-P01 1",
+  ].join("\n"));
+  assert.deepEqual(result.errors.map((e) => e.lineNumber), [1, 2, 3, 4, 5]);
+  assert.match(result.errors[0].message, /not a Weiss Schwarz card ID/);
+  assert.deepEqual(result.requests.map((r) => r.normalizedId), ["kka/w102-005sec", "kka/w102-p01"]);
 });
 
 test("grouping preserves request and group order", () => {

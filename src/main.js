@@ -3,36 +3,11 @@ import { lookupProducts } from "./core/lookup.js";
 import { addCartItems } from "./core/cart.js";
 import { mountApp } from "./ui/app.js";
 
-function uiRow(row) {
-  const product = row.product;
-  return {
-    ...row,
-    requestedId: row.originalIds?.[0] ?? row.originalId ?? row.normalizedId,
-    printedId: row.canonicalPrintedId ?? product?.printedId ?? null,
-    stock: row.availableStock,
-    gid: product?.gid,
-    ver: product?.ver,
-    cid: product?.cid,
-    kizu: row.kizu ?? product?.kizu,
-    condition: row.condition ?? product?.condition ?? (product?.kizu === "0" ? "normal" : "damaged"),
-    limit: product?.limit,
-  };
-}
-
 mountApp({
   parse: parseInput,
-  async resolve(requests, options = {}) {
-    const resolved = await lookupProducts(requests, {
-      signal: options.signal,
-      conditionPreference: options.conditionPreference,
-      onProgress: options.onProgress,
-    });
-    return resolved.rows.map(uiRow);
+  async resolve(requests, { signal, conditionPreference, onProgress } = {}) {
+    const { rows } = await lookupProducts(requests, { signal, conditionPreference, onProgress });
+    return rows;
   },
-  addItems(rows, options = {}) {
-    return addCartItems(rows, {
-      cancelSignal: options.cancelSignal,
-      onProgress: options.onProgress,
-    });
-  },
+  addItems: (items, { cancelSignal, onProgress } = {}) => addCartItems(items, { cancelSignal, onProgress }),
 });

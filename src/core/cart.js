@@ -8,7 +8,7 @@
  */
 
 import { ERROR_CODES, YytError } from "./errors.js";
-import { withRequestDeadline } from "./request.js";
+import { notify, responseOk, responseStatus as statusOf, wait, withRequestDeadline } from "./request.js";
 
 export { ERROR_CODES };
 export const CART_ERROR_CODES = ERROR_CODES;
@@ -152,8 +152,8 @@ async function loadCsrfToken(options) {
     );
   }
 
-  const responseStatus = numericResponseStatus(response);
-  if (!responseIsOk(response)) {
+  const responseStatus = statusOf(response);
+  if (!responseOk(response)) {
     throw new CartError(
       CART_ERROR_CODES.CSRF_MISSING,
       "The CSRF token could not be loaded. Nothing was added to the cart.",
@@ -181,19 +181,6 @@ async function loadCsrfToken(options) {
     );
   }
   return token;
-}
-
-function numericResponseStatus(response) {
-  const status = Number(response?.status);
-  return Number.isFinite(status) && status > 0 ? status : null;
-}
-
-function responseIsOk(response) {
-  if (typeof response?.ok === "boolean") {
-    return response.ok;
-  }
-  const status = numericResponseStatus(response);
-  return status !== null && status >= 200 && status < 300;
 }
 
 function parseInteger(value, label, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -258,7 +245,6 @@ function skippedResult(item, code, message, attemptedQuantity = 0) {
     message,
     responseStatus: null,
     code,
-    errorCode: code,
     stopBatch: false,
   };
 }
@@ -347,7 +333,7 @@ function classifyHttpFailure(status, parsed, responseOk) {
  * the response as text/html, so this always reads text and parses explicitly.
  */
 export async function parseCartResponse(response, item = {}, attemptedQuantity = 0) {
-  const responseStatus = numericResponseStatus(response);
+  const responseStatus = statusOf(response);
   if (responseStatus >= 500) return unknownResult(item, attemptedQuantity, responseStatus);
   let text;
   try {
@@ -356,7 +342,7 @@ export async function parseCartResponse(response, item = {}, attemptedQuantity =
     // A client rejection such as 403/429 remains classifiable even
     // if its body stream is interrupted.  For a 2xx response, however, the
     // server may have accepted the mutation before the body was lost.
-    if (!responseIsOk(response)) {
+    if (!responseOk(response)) {
       const classification = classifyHttpFailure(responseStatus, null, false);
       return {
         ...resultBase(item, attemptedQuantity),
@@ -364,7 +350,6 @@ export async function parseCartResponse(response, item = {}, attemptedQuantity =
         message: classification.message,
         responseStatus,
         code: classification.code,
-        errorCode: classification.code,
         stopBatch: classification.stopBatch,
       };
     }
@@ -374,7 +359,6 @@ export async function parseCartResponse(response, item = {}, attemptedQuantity =
       message: "The cart response was interrupted; inspect /cart/sell before retrying.",
       responseStatus,
       code: CART_ERROR_CODES.CART_OUTCOME_UNKNOWN,
-      errorCode: CART_ERROR_CODES.CART_OUTCOME_UNKNOWN,
       stopBatch: true,
     };
   }
@@ -383,7 +367,7 @@ export async function parseCartResponse(response, item = {}, attemptedQuantity =
   try {
     parsed = JSON.parse(String(text).replace(/^\uFEFF/u, ""));
   } catch {
-    if (responseIsOk(response)) return unknownResult(item, attemptedQuantity, responseStatus);
+    if (responseOk(response)) return unknownResult(item, attemptedQuantity, responseStatus);
     const code = classifyHttpFailure(responseStatus, null, false).code;
     return {
       ...resultBase(item, attemptedQuantity),
@@ -391,34 +375,31 @@ export async function parseCartResponse(response, item = {}, attemptedQuantity =
       message: "YYT rejected this cart item with an unreadable response.",
       responseStatus,
       code,
-      errorCode: code,
       stopBatch: true,
     };
   }
 
-  if (responseIsOk(response) && parsed?.status === CART_SUCCESS_STATUS) {
+  if (responseOk(response) && parsed?.status === CART_SUCCESS_STATUS) {
     return {
       ...resultBase(item, attemptedQuantity),
       outcome: "success",
       message: `Added ${attemptedQuantity}`,
       responseStatus,
       code: null,
-      errorCode: null,
       stopBatch: false,
     };
   }
 
-  if (responseIsOk(response) && (!parsed || typeof parsed.status !== "string" || !parsed.status.trim())) {
+  if (responseOk(response) && (!parsed || typeof parsed.status !== "string" || !parsed.status.trim())) {
     return unknownResult(item, attemptedQuantity, responseStatus);
   }
-  const classification = classifyHttpFailure(responseStatus, parsed, responseIsOk(response));
+  const classification = classifyHttpFailure(responseStatus, parsed, responseOk(response));
   return {
     ...resultBase(item, attemptedQuantity),
     outcome: "failed",
     message: classification.message,
     responseStatus,
     code: classification.code,
-    errorCode: classification.code,
     stopBatch: classification.stopBatch,
   };
 }
@@ -534,7 +515,6 @@ function unknownResult(item, attemptedQuantity, responseStatus = null) {
     message: "The cart request outcome is unknown; inspect /cart/sell before retrying.",
     responseStatus,
     code,
-    errorCode: code,
     stopBatch: true,
   };
 }
@@ -592,37 +572,6 @@ function isCancelled(options) {
 
 function skippedAfterStop(item, code, message) {
   return skippedResult(item, code ?? CART_ERROR_CODES.CART_REJECTED, message);
-}
-
-function notifyProgress(callback, value) {
-  if (typeof callback !== "function") {
-    return;
-  }
-  try {
-    callback(value);
-  } catch {
-    // A UI callback must never alter cart sequencing or turn a known result
-    // into an unknown one.
-  }
-}
-
-/**
- * Resolve after `milliseconds`, or as soon as `cancelSignal` aborts.
- */
-function waitUnlessCancelled(milliseconds, cancelSignal) {
-  return new Promise((resolve) => {
-    if (cancelSignal?.aborted) {
-      resolve();
-      return;
-    }
-    const done = () => {
-      clearTimeout(timer);
-      cancelSignal?.removeEventListener("abort", done);
-      resolve();
-    };
-    const timer = setTimeout(done, milliseconds);
-    cancelSignal?.addEventListener("abort", done, { once: true });
-  });
 }
 
 /**
@@ -694,7 +643,7 @@ export async function addCartItems(items, options = {}) {
 
   const delayMs = options.delayMs ?? DEFAULT_CART_DELAY_MS;
   const sleep = options.sleep ??
-    ((milliseconds) => waitUnlessCancelled(milliseconds, options.cancelSignal));
+    ((milliseconds) => wait(milliseconds, options.cancelSignal));
   let stopped = false;
   let cancelled = false;
   let stopCode = null;
@@ -719,7 +668,7 @@ export async function addCartItems(items, options = {}) {
       csrfToken,
     });
     results.push(result);
-    notifyProgress(options.onProgress, {
+    notify(options.onProgress, {
       index,
       total: list.length,
       item,

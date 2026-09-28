@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YYT Weiss Schwarz Cart Adder
 // @namespace    local.yyt-cart-adder
-// @version      0.3.1
+// @version      0.3.2
 // @description  Resolve Weiss Schwarz card IDs and add reviewed quantities to a YYT cart.
 // @homepageURL  https://github.com/ahuei123456/yyt-cart-adder
 // @updateURL    https://raw.githubusercontent.com/ahuei123456/yyt-cart-adder/master/dist/yyt-cart-adder.user.js
@@ -340,6 +340,18 @@
         })
       };
     }
+    if (extractPrintedId(originalId) !== originalId) {
+      return {
+        kind: "error",
+        error: makeInputError({
+          lineNumber,
+          raw,
+          original: originalId,
+          normalizedId,
+          message: `"${originalId}" is not a Weiss Schwarz card ID such as Kka/W102-005SEC.`
+        })
+      };
+    }
     const remainder = idMatch[2]?.trim() ?? "";
     if (!remainder) {
       return {
@@ -494,6 +506,37 @@
       controller.signal.removeEventListener("abort", stop);
     }
   }
+  function responseStatus(response) {
+    const status = Number(response?.status);
+    return Number.isInteger(status) && status > 0 ? status : null;
+  }
+  function responseOk(response) {
+    if (typeof response?.ok === "boolean") return response.ok;
+    const status = responseStatus(response);
+    return status !== null && status >= 200 && status < 300;
+  }
+  function wait(milliseconds, signal) {
+    return new Promise((resolve) => {
+      if (signal?.aborted) {
+        resolve();
+        return;
+      }
+      const done = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, milliseconds);
+      signal?.addEventListener("abort", done, { once: true });
+    });
+  }
+  function notify(callback, value) {
+    if (typeof callback !== "function") return;
+    try {
+      callback(value);
+    } catch {
+    }
+  }
 
   // src/core/lookup.js
   var LOOKUP_ERROR_CODES = Object.freeze({
@@ -513,73 +556,20 @@
     if (!value || typeof value !== "object") return "";
     return String(value.originalId ?? value.originalIds?.[0] ?? "").trim();
   }
-  function requestQuantity(value) {
-    if (!value || typeof value !== "object") return 1;
-    return value.requestedQuantity ?? 1;
-  }
-  function sourceLines(value) {
-    const lines = value?.sourceLines;
-    return Array.isArray(lines) ? lines.filter((line) => Number.isInteger(line)) : [];
-  }
-  function isValidQuantity(value) {
-    return (typeof value === "number" || typeof value === "string") && /^\d+$/u.test(String(value).trim()) && Number.isSafeInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 99;
-  }
   function makeRequest(value, index) {
-    const printedId = requestId(value);
-    const normalizedId = normalizePrintedId(
-      value && typeof value === "object" && value.normalizedId ? value.normalizedId : printedId
-    );
-    const rawQuantity = requestQuantity(value);
-    const validQuantity = isValidQuantity(rawQuantity);
-    const requestedQuantity = validQuantity ? Number(rawQuantity) : Number(rawQuantity) || 0;
-    const originals = value && typeof value === "object" && Array.isArray(value.originalIds) ? value.originalIds.map((id) => String(id)) : printedId ? [printedId] : [];
-    const condition = value && typeof value === "object" && typeof value.condition === "string" ? value.condition : null;
-    const rarity = value && typeof value === "object" ? normalizeRarity(value.rarity) : null;
+    const fields = typeof value === "string" ? { originalIds: [value] } : value;
+    const originalIds = (fields.originalIds ?? [fields.originalId]).map((id) => String(id).trim());
+    const rarity = normalizeRarity(fields.rarity);
     return {
-      originalId: printedId || originals[0] || String(value?.normalizedId ?? ""),
-      originalIds: originals,
-      normalizedId,
-      ...condition ? { condition } : {},
+      originalId: originalIds[0],
+      originalIds,
+      normalizedId: fields.normalizedId ?? normalizePrintedId(originalIds[0]),
+      ...fields.condition ? { condition: fields.condition } : {},
       ...rarity ? { rarity } : {},
-      requestedQuantity,
-      sourceLines: sourceLines(value),
-      inputIndex: index,
-      invalid: !printedId || !normalizedId || !validQuantity,
-      invalidReason: !printedId ? "missing printed ID" : !validQuantity ? "quantity must be an integer from 1 through 99" : null
+      requestedQuantity: fields.requestedQuantity ?? 1,
+      sourceLines: fields.sourceLines ?? [],
+      inputIndex: index
     };
-  }
-  function mergeRequest(existing, incoming) {
-    if (!existing) return incoming;
-    existing.originalIds.push(...incoming.originalIds);
-    existing.sourceLines.push(...incoming.sourceLines);
-    if (existing.invalid || incoming.invalid) {
-      existing.invalid = true;
-      existing.invalidReason = existing.invalidReason ?? incoming.invalidReason;
-    }
-    existing.requestedQuantity += incoming.requestedQuantity;
-    if (existing.requestedQuantity > 99) {
-      existing.invalid = true;
-      existing.invalidReason = "duplicate quantity total exceeds 99";
-    }
-    return existing;
-  }
-  function normalizeRequests(requests) {
-    if (!Array.isArray(requests)) {
-      throw new TypeError("lookup requests must be an array");
-    }
-    const byId = /* @__PURE__ */ new Map();
-    const invalidWithoutId = [];
-    requests.forEach((value, index) => {
-      const request = makeRequest(value, index);
-      if (!request.normalizedId) {
-        invalidWithoutId.push(request);
-        return;
-      }
-      const key = `${request.normalizedId}:${request.condition ?? ""}:${request.rarity ?? ""}`;
-      const existing = byId.get(key);
-      byId.set(key, mergeRequest(existing, request));
-    });
-    return [...byId.values(), ...invalidWithoutId];
   }
   function getSearchPrefix(value) {
     const id = requestId(value);
@@ -632,15 +622,6 @@
     url.searchParams.set("search_word", query);
     return url.toString();
   }
-  function responseStatus(response) {
-    const status = Number(response?.status);
-    return Number.isInteger(status) && status > 0 ? status : response?.ok === false ? 0 : 200;
-  }
-  function responseOk(response) {
-    if (typeof response?.ok === "boolean") return response.ok;
-    const status = responseStatus(response);
-    return status >= 200 && status < 300;
-  }
   function retryAfterMilliseconds(response) {
     const header = response?.headers?.get?.("Retry-After") ?? response?.headers?.["Retry-After"];
     if (header == null) return null;
@@ -659,20 +640,8 @@
       await options.sleep(milliseconds);
       return;
     }
-    const signal = options.signal;
-    const cancelled = () => new DOMException("The lookup was cancelled", "AbortError");
-    if (signal?.aborted) throw cancelled();
-    await new Promise((resolve, reject) => {
-      const onAbort = () => {
-        clearTimeout(timer);
-        reject(cancelled());
-      };
-      const timer = setTimeout(() => {
-        signal?.removeEventListener("abort", onAbort);
-        resolve();
-      }, milliseconds);
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
+    await wait(milliseconds, options.signal);
+    if (options.signal?.aborted) throw new DOMException("The lookup was cancelled", "AbortError");
   }
   function isAbortError(error) {
     return error?.name === "AbortError" || error?.code === "ABORT_ERR";
@@ -754,69 +723,31 @@
       stock: availableStock
     };
   }
-  function makeInvalidRow(request) {
+  function unresolvedRow(request, status, reason, extra = {}) {
     return {
       ...request,
-      status: "invalid",
-      reason: ERROR_CODES.INPUT_INVALID,
-      canonicalPrintedId: null,
+      status,
+      reason,
+      printedId: null,
       product: null,
       name: "",
       priceYen: null,
-      availableStock: 0,
+      stock: 0,
       plannedQuantity: 0,
       selected: false,
-      condition: request.condition ?? null
+      candidates: [],
+      condition: request.condition ?? null,
+      ...extra
     };
   }
   function makeMissingRow(request, reason = ERROR_CODES.PRODUCT_MISSING) {
-    return {
-      ...request,
-      status: "missing",
-      reason,
-      canonicalPrintedId: null,
-      product: null,
-      name: "",
-      priceYen: null,
-      availableStock: 0,
-      plannedQuantity: 0,
-      selected: false,
-      candidates: [],
-      condition: request.condition ?? null
-    };
+    return unresolvedRow(request, "missing", reason);
   }
   function makeErrorRow(request, error) {
-    return {
-      ...request,
-      status: "error",
-      reason: error.code,
-      errorMessage: error.message,
-      canonicalPrintedId: null,
-      product: null,
-      name: "",
-      priceYen: null,
-      availableStock: 0,
-      plannedQuantity: 0,
-      selected: false,
-      candidates: [],
-      condition: request.condition ?? null
-    };
+    return unresolvedRow(request, "error", error.code, { errorMessage: error.message });
   }
   function makeAmbiguousRow(request, candidates) {
-    return {
-      ...request,
-      status: "ambiguous",
-      reason: ERROR_CODES.PRODUCT_AMBIGUOUS,
-      canonicalPrintedId: null,
-      product: null,
-      name: "",
-      priceYen: null,
-      availableStock: 0,
-      plannedQuantity: 0,
-      selected: false,
-      candidates,
-      condition: request.condition ?? null
-    };
+    return unresolvedRow(request, "ambiguous", ERROR_CODES.PRODUCT_AMBIGUOUS, { candidates });
   }
   function buildRow(request, product, plannedQuantity, stock, statusOverride = null) {
     const soldOut = Boolean(product.soldOut) || stock <= 0;
@@ -825,14 +756,14 @@
       ...request,
       status,
       reason: status === "ready" ? null : status === "partial" ? ERROR_CODES.PRODUCT_PARTIAL_STOCK : ERROR_CODES.PRODUCT_SOLD_OUT,
-      canonicalPrintedId: product.printedId,
+      printedId: product.printedId,
       rarity: product.rarity ?? null,
       condition: product.condition || (product.kizu === "0" ? "normal" : "damaged"),
       kizu: product.kizu,
       product,
       name: product.name ?? "",
       priceYen: product.priceYen ?? null,
-      availableStock: stock,
+      stock,
       plannedQuantity,
       selected: plannedQuantity > 0,
       candidates: [product]
@@ -883,7 +814,6 @@
     return [...groups].map(([rarity, products]) => ({ rarity, products }));
   }
   function makeRows(request, candidates, options = {}) {
-    if (request.invalid) return [makeInvalidRow(request)];
     const exact = candidates ?? [];
     if (exact.length === 0) {
       return [makeMissingRow(request)];
@@ -942,13 +872,6 @@
     }
     return [makeMissingRow(request)];
   }
-  function notifyProgress(options, progress) {
-    if (typeof options.onProgress !== "function") return;
-    try {
-      options.onProgress(progress);
-    } catch {
-    }
-  }
   async function delayBetweenQueries(options, queryNumber) {
     const delay = Number.isFinite(options.delayMs) ? Math.max(0, options.delayMs) : 250;
     if (queryNumber > 0) await sleep(delay, options);
@@ -973,18 +896,17 @@
     }
   }
   async function lookupProducts(requests, options = {}) {
-    const normalizedRequests = normalizeRequests(requests);
-    const validRequests = normalizedRequests.filter((request) => !request.invalid);
-    const expectedIds = new Set(validRequests.map((request) => request.normalizedId));
+    const normalizedRequests = requests.map(makeRequest);
+    const expectedIds = new Set(normalizedRequests.map((request) => request.normalizedId));
     const candidatesById = /* @__PURE__ */ new Map();
     const failuresById = /* @__PURE__ */ new Map();
     const queries = [];
-    const { groups, fallbackIds } = buildLookupPlan(validRequests);
+    const { groups, fallbackIds } = buildLookupPlan(normalizedRequests);
     let queryNumber = 0;
     const runQuery = async (type, query, queryIds, progress) => {
       await delayBetweenQueries(options, queryNumber);
       queryNumber += 1;
-      notifyProgress(options, { type, query, ...progress });
+      notify(options.onProgress, { type, query, ...progress });
       try {
         const page = await fetchSearchPage(query, options);
         const parsed = parseSearchResults(page.html);
@@ -1009,7 +931,7 @@
       await runQuery("prefix", prefix, queryExpectedIds(values), { index: groupIndex, total: groups.size });
       groupIndex += 1;
     }
-    for (const request of validRequests) {
+    for (const request of normalizedRequests) {
       if (!candidatesById.has(request.normalizedId) && !failuresById.has(request.normalizedId)) {
         fallbackIds.push(request);
       }
@@ -1029,7 +951,7 @@
     }
     const rows = dropDuplicateOptions(
       normalizedRequests.flatMap((request) => {
-        const failure = request.invalid || candidatesById.has(request.normalizedId) ? null : failuresById.get(request.normalizedId);
+        const failure = candidatesById.has(request.normalizedId) ? null : failuresById.get(request.normalizedId);
         return failure ? [makeErrorRow(request, failure)] : makeRows(request, candidatesById.get(request.normalizedId), options);
       })
     );
@@ -1145,8 +1067,8 @@
         { cause: error }
       );
     }
-    const responseStatus2 = numericResponseStatus(response);
-    if (!responseIsOk(response)) {
+    const responseStatus2 = responseStatus(response);
+    if (!responseOk(response)) {
       throw new CartError(
         CART_ERROR_CODES.CSRF_MISSING,
         "The CSRF token could not be loaded. Nothing was added to the cart.",
@@ -1172,17 +1094,6 @@
       );
     }
     return token;
-  }
-  function numericResponseStatus(response) {
-    const status = Number(response?.status);
-    return Number.isFinite(status) && status > 0 ? status : null;
-  }
-  function responseIsOk(response) {
-    if (typeof response?.ok === "boolean") {
-      return response.ok;
-    }
-    const status = numericResponseStatus(response);
-    return status !== null && status >= 200 && status < 300;
   }
   function parseInteger(value, label, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
     let candidate = value;
@@ -1235,7 +1146,6 @@
       message,
       responseStatus: null,
       code,
-      errorCode: code,
       stopBatch: false
     };
   }
@@ -1301,13 +1211,13 @@
     };
   }
   async function parseCartResponse(response, item = {}, attemptedQuantity = 0) {
-    const responseStatus2 = numericResponseStatus(response);
+    const responseStatus2 = responseStatus(response);
     if (responseStatus2 >= 500) return unknownResult(item, attemptedQuantity, responseStatus2);
     let text;
     try {
       text = await response.text();
     } catch {
-      if (!responseIsOk(response)) {
+      if (!responseOk(response)) {
         const classification2 = classifyHttpFailure(responseStatus2, null, false);
         return {
           ...resultBase(item, attemptedQuantity),
@@ -1315,7 +1225,6 @@
           message: classification2.message,
           responseStatus: responseStatus2,
           code: classification2.code,
-          errorCode: classification2.code,
           stopBatch: classification2.stopBatch
         };
       }
@@ -1325,7 +1234,6 @@
         message: "The cart response was interrupted; inspect /cart/sell before retrying.",
         responseStatus: responseStatus2,
         code: CART_ERROR_CODES.CART_OUTCOME_UNKNOWN,
-        errorCode: CART_ERROR_CODES.CART_OUTCOME_UNKNOWN,
         stopBatch: true
       };
     }
@@ -1333,7 +1241,7 @@
     try {
       parsed = JSON.parse(String(text).replace(/^\uFEFF/u, ""));
     } catch {
-      if (responseIsOk(response)) return unknownResult(item, attemptedQuantity, responseStatus2);
+      if (responseOk(response)) return unknownResult(item, attemptedQuantity, responseStatus2);
       const code = classifyHttpFailure(responseStatus2, null, false).code;
       return {
         ...resultBase(item, attemptedQuantity),
@@ -1341,32 +1249,29 @@
         message: "YYT rejected this cart item with an unreadable response.",
         responseStatus: responseStatus2,
         code,
-        errorCode: code,
         stopBatch: true
       };
     }
-    if (responseIsOk(response) && parsed?.status === CART_SUCCESS_STATUS) {
+    if (responseOk(response) && parsed?.status === CART_SUCCESS_STATUS) {
       return {
         ...resultBase(item, attemptedQuantity),
         outcome: "success",
         message: `Added ${attemptedQuantity}`,
         responseStatus: responseStatus2,
         code: null,
-        errorCode: null,
         stopBatch: false
       };
     }
-    if (responseIsOk(response) && (!parsed || typeof parsed.status !== "string" || !parsed.status.trim())) {
+    if (responseOk(response) && (!parsed || typeof parsed.status !== "string" || !parsed.status.trim())) {
       return unknownResult(item, attemptedQuantity, responseStatus2);
     }
-    const classification = classifyHttpFailure(responseStatus2, parsed, responseIsOk(response));
+    const classification = classifyHttpFailure(responseStatus2, parsed, responseOk(response));
     return {
       ...resultBase(item, attemptedQuantity),
       outcome: "failed",
       message: classification.message,
       responseStatus: responseStatus2,
       code: classification.code,
-      errorCode: classification.code,
       stopBatch: classification.stopBatch
     };
   }
@@ -1471,7 +1376,6 @@
       message: "The cart request outcome is unknown; inspect /cart/sell before retrying.",
       responseStatus: responseStatus2,
       code,
-      errorCode: code,
       stopBatch: true
     };
   }
@@ -1516,30 +1420,6 @@
   }
   function skippedAfterStop(item, code, message) {
     return skippedResult(item, code ?? CART_ERROR_CODES.CART_REJECTED, message);
-  }
-  function notifyProgress2(callback, value) {
-    if (typeof callback !== "function") {
-      return;
-    }
-    try {
-      callback(value);
-    } catch {
-    }
-  }
-  function waitUnlessCancelled(milliseconds, cancelSignal) {
-    return new Promise((resolve) => {
-      if (cancelSignal?.aborted) {
-        resolve();
-        return;
-      }
-      const done = () => {
-        clearTimeout(timer);
-        cancelSignal?.removeEventListener("abort", done);
-        resolve();
-      };
-      const timer = setTimeout(done, milliseconds);
-      cancelSignal?.addEventListener("abort", done, { once: true });
-    });
   }
   async function addCartItems(items, options = {}) {
     const list = Array.from(items ?? []);
@@ -1593,7 +1473,7 @@
       }
     }
     const delayMs = options.delayMs ?? DEFAULT_CART_DELAY_MS;
-    const sleep2 = options.sleep ?? ((milliseconds) => waitUnlessCancelled(milliseconds, options.cancelSignal));
+    const sleep2 = options.sleep ?? ((milliseconds) => wait(milliseconds, options.cancelSignal));
     let stopped = false;
     let cancelled = false;
     let stopCode = null;
@@ -1616,7 +1496,7 @@
         csrfToken
       });
       results.push(result);
-      notifyProgress2(options.onProgress, {
+      notify(options.onProgress, {
         index,
         total: list.length,
         item,
@@ -1662,6 +1542,54 @@
       processedCount: results.filter((result) => result.outcome !== "skipped").length,
       successfulCount
     };
+  }
+
+  // src/ui/review.js
+  var MAX_COPIES = 99;
+  function isSelectable(row) {
+    return ["ready", "partial", "option"].includes(row.status) && (row.stock ?? 0) > 0;
+  }
+  function chosenRows(rows) {
+    return rows.filter((row) => row.selected && row.plannedQuantity > 0);
+  }
+  function groupBy(rows, keyOf) {
+    const groups = /* @__PURE__ */ new Map();
+    for (const row of rows) {
+      const key = keyOf(row);
+      if (key == null) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+    return [...groups.values()];
+  }
+  var adding = (rows) => rows.filter((row) => row.selected).reduce((n, row) => n + (row.plannedQuantity || 0), 0);
+  function summarizeReview(rows) {
+    const chosen = chosenRows(rows);
+    const cards = (list) => list.reduce((n, row) => n + row.plannedQuantity, 0);
+    const totalCards = cards(chosen);
+    const damagedCards = cards(chosen.filter((row) => row.condition === "damaged"));
+    const overRequested = groupBy(rows, (row) => Number.isInteger(row.inputIndex) ? row.inputIndex : null).map((group) => ({ rows: group, adding: adding(group), requested: group[0].requestedQuantity || 0 })).filter((group) => group.rows.length > 1 && group.adding > group.requested);
+    const overStock = groupBy(rows, (row) => productKey(row.product)).map((group) => ({ rows: group, adding: adding(group), max: Math.min(MAX_COPIES, ...group.map((row) => row.stock ?? 0)) })).filter((group) => group.rows.length > 1 && group.adding > group.max);
+    return {
+      chosen,
+      totalCards,
+      damagedCards,
+      normalCards: totalCards - damagedCards,
+      totalYen: chosen.reduce((n, row) => n + (row.priceYen || 0) * row.plannedQuantity, 0),
+      productCount: new Set(chosen.map((row) => productKey(row.product) ?? row)).size,
+      overRequested,
+      overStock
+    };
+  }
+  function mergeByProduct(chosen) {
+    const byProduct = /* @__PURE__ */ new Map();
+    for (const row of chosen) {
+      const key = productKey(row.product) ?? row;
+      const merged = byProduct.get(key);
+      if (merged) merged.plannedQuantity += row.plannedQuantity;
+      else byProduct.set(key, { ...row });
+    }
+    return [...byProduct.values()];
   }
 
   // src/ui/styles.js
@@ -1767,7 +1695,7 @@ a { color: #175cd3; }
     root.append(launcher, backdrop);
     let previousFocus = null;
     let lookupController = null;
-    let adding = false;
+    let adding2 = false;
     let showingResults = false;
     let resultsUnseen = false;
     const setView = (...nodes) => {
@@ -1850,7 +1778,7 @@ a { color: #175cd3; }
     }
     async function showResolving(parsed, source, conditionPreference = "prefer-normal") {
       lookupController = new AbortController();
-      const message = el("p", { text: `Resolving ${parsed.requests.length} distinct card requests\u2026` });
+      const message = el("p", { role: "status", text: `Resolving ${parsed.requests.length} distinct card requests\u2026` });
       const cancel = el("button", { type: "button", text: "Cancel", onClick: () => lookupController.abort() });
       setView(el("h3", { text: "Resolving" }), message, el("progress", { className: "progress" }), el("div", { className: "actions" }, cancel));
       const { signal } = lookupController;
@@ -1865,7 +1793,7 @@ a { color: #175cd3; }
         const invalidRows = parsed.errors.map((item) => ({
           ...item,
           status: "invalid",
-          requestedId: item.original || "\u2014",
+          originalId: item.original || "\u2014",
           requestedQuantity: 0,
           plannedQuantity: 0
         }));
@@ -1881,10 +1809,9 @@ a { color: #175cd3; }
       }
     }
     function showReview(rows, source, conditionPreference = "prefer-normal") {
-      const isRowSelectable = (r) => (r.status === "ready" || r.status === "partial" || r.status === "option") && (r.stock ?? r.availableStock ?? 0) > 0;
       for (const row of rows) {
         if (typeof row.selected !== "boolean") {
-          row.selected = isRowSelectable(row) && row.plannedQuantity > 0;
+          row.selected = isSelectable(row) && row.plannedQuantity > 0;
         }
       }
       const tbody = el("tbody");
@@ -1894,12 +1821,8 @@ a { color: #175cd3; }
       const totalText = el("span");
       const submit = el("button", { className: "primary", type: "button" });
       const update = () => {
-        const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
-        const totalCards = chosen.reduce((n, r) => n + r.plannedQuantity, 0);
-        const normalCards = chosen.filter((r) => r.condition !== "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
-        const damagedCards = chosen.filter((r) => r.condition === "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
-        const total = chosen.reduce((n, r) => n + (r.priceYen || 0) * r.plannedQuantity, 0);
-        const productCount = new Set(chosen.map((r) => productKey(r.product) ?? r)).size;
+        const summary = summarizeReview(rows);
+        const { totalCards, normalCards, damagedCards, productCount } = summary;
         let desc = `${productCount} product${productCount === 1 ? "" : "s"} / ${totalCards} card${totalCards === 1 ? "" : "s"}`;
         if (damagedCards > 0 && normalCards > 0) {
           desc += ` (${normalCards} normal, ${damagedCards} damaged)`;
@@ -1907,35 +1830,12 @@ a { color: #175cd3; }
           desc += ` (all ${damagedCards} damaged)`;
         }
         countText.textContent = desc;
-        const byRequest = /* @__PURE__ */ new Map();
-        for (const r of rows) {
-          if (!Number.isInteger(r.inputIndex)) continue;
-          if (!byRequest.has(r.inputIndex)) byRequest.set(r.inputIndex, []);
-          byRequest.get(r.inputIndex).push(r);
+        for (const tr of rowElements.values()) tr.classList.remove("over");
+        for (const group of [...summary.overRequested, ...summary.overStock]) {
+          for (const r of group.rows) rowElements.get(r)?.classList.add("over");
         }
-        const over = [];
-        for (const group of byRequest.values()) {
-          const adding2 = group.filter((r) => r.selected).reduce((n, r) => n + (r.plannedQuantity || 0), 0);
-          const requested = group[0].requestedQuantity || 0;
-          const isOver = group.length > 1 && adding2 > requested;
-          for (const r of group) rowElements.get(r)?.classList.toggle("over", isOver);
-          if (isOver) over.push(`${group[0].requestedId || group[0].originalId}: adding ${adding2}, requested ${requested}`);
-        }
-        const byProduct = /* @__PURE__ */ new Map();
-        for (const r of rows) {
-          const key = productKey(r.product);
-          if (!key) continue;
-          if (!byProduct.has(key)) byProduct.set(key, []);
-          byProduct.get(key).push(r);
-        }
-        const overStock = [];
-        for (const group of byProduct.values()) {
-          const adding2 = group.filter((r) => r.selected).reduce((n, r) => n + (r.plannedQuantity || 0), 0);
-          const stock = Math.min(99, ...group.map((r) => r.stock ?? r.availableStock ?? 0));
-          const isOver = group.length > 1 && adding2 > stock;
-          for (const r of group) if (isOver) rowElements.get(r)?.classList.add("over");
-          if (isOver) overStock.push(`${group[0].printedId} (${group[0].condition}): adding ${adding2} across lines, maximum ${stock} allowed`);
-        }
+        const over = summary.overRequested.map(({ rows: [first], adding: adding3, requested }) => `${first.originalId}: adding ${adding3}, requested ${requested}`);
+        const overStock = summary.overStock.map(({ rows: [first], adding: adding3, max }) => `${first.printedId} (${first.condition}): adding ${adding3} across lines, maximum ${max} allowed`);
         const messages = [
           over.length ? `More copies than requested:
 ${over.join("\n")}` : "",
@@ -1944,17 +1844,17 @@ ${overStock.join("\n")}` : ""
         ].filter(Boolean);
         overWarning.hidden = !messages.length;
         overWarning.textContent = messages.join("\n\n");
-        totalText.textContent = `Estimated selected total: ${yen.format(total)}`;
+        totalText.textContent = `Estimated selected total: ${yen.format(summary.totalYen)}`;
         submit.textContent = `Add ${totalCards} card${totalCards === 1 ? "" : "s"} from ${productCount} product${productCount === 1 ? "" : "s"}`;
-        submit.disabled = !chosen.length || overStock.length > 0;
+        submit.disabled = !summary.chosen.length || overStock.length > 0;
       };
       for (const row of rows) {
-        const stock = row.stock ?? row.availableStock ?? 0;
-        const quantityLimit = Math.min(stock, 99);
-        const selectable = isRowSelectable(row);
+        const stock = row.stock ?? 0;
+        const quantityLimit = Math.min(stock, MAX_COPIES);
+        const selectable = isSelectable(row);
         const checkbox = el("input", {
           type: "checkbox",
-          "aria-label": `Select ${row.requestedId || row.printedId || "card"}`
+          "aria-label": `Select ${row.originalId || row.printedId || "card"}`
         });
         checkbox.checked = Boolean(row.selected && row.plannedQuantity > 0);
         checkbox.disabled = !selectable;
@@ -1966,7 +1866,7 @@ ${overStock.join("\n")}` : ""
             min: 0,
             max: quantityLimit,
             value: String(row.plannedQuantity ?? 0),
-            "aria-label": `Quantity for ${row.printedId || row.requestedId}`
+            "aria-label": `Quantity for ${row.printedId || row.originalId}`
           });
           qtyInput.addEventListener("input", () => {
             let val = Number(qtyInput.value);
@@ -2006,7 +1906,7 @@ ${overStock.join("\n")}` : ""
           "tr",
           { className: [row.status === "partial" ? "partial" : selectable ? "" : "unavailable", isOption ? "alt" : ""].filter(Boolean).join(" ") },
           el("td", {}, checkbox),
-          el("td", { text: row.requestedId || row.originalIds?.[0] || "\u2014" }),
+          el("td", { text: row.originalId || "\u2014" }),
           el("td", { text: row.printedId || "\u2014" }),
           el("td", { className: "rarity", text: row.rarity ? `${isOption ? "\u21B3 " : ""}${row.rarity}` : "\u2014" }),
           el("td", {}, condBadge),
@@ -2029,8 +1929,8 @@ ${overStock.join("\n")}` : ""
         tbody
       );
       submit.addEventListener("click", async () => {
-        if (adding) return;
-        const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
+        if (adding2) return;
+        const { chosen } = summarizeReview(rows);
         if (chosen.length) await runBatch(rows, chosen);
       });
       update();
@@ -2045,18 +1945,11 @@ ${overStock.join("\n")}` : ""
       submit.focus();
     }
     async function runBatch(allRows, chosen) {
-      adding = true;
-      const byProduct = /* @__PURE__ */ new Map();
-      for (const row of chosen) {
-        const key = productKey(row.product) ?? row;
-        const merged = byProduct.get(key);
-        if (merged) merged.plannedQuantity += row.plannedQuantity;
-        else byProduct.set(key, { ...row });
-      }
-      const items = [...byProduct.values()];
+      adding2 = true;
+      const items = mergeByProduct(chosen);
       const cancelController = new AbortController();
       const describe = (row, index) => `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${items.length})\u2026`;
-      const current = el("p", { text: describe(items[0], 0) });
+      const current = el("p", { role: "status", text: describe(items[0], 0) });
       const progress = el("progress", { className: "progress", max: items.length, value: 0 });
       const cancel = el("button", { className: "danger", type: "button", text: "Cancel before next item", onClick: () => {
         cancelController.abort();
@@ -2085,7 +1978,7 @@ ${overStock.join("\n")}` : ""
       } catch (error) {
         results = [{ outcome: "unknown", message: error.message || "The batch stopped unexpectedly; inspect the cart before retrying." }];
       }
-      adding = false;
+      adding2 = false;
       if (backdrop.hidden) resultsUnseen = true;
       showResults(allRows, chosen, results);
     }
@@ -2105,14 +1998,14 @@ ${overStock.join("\n")}` : ""
         const list = el("ul");
         for (const result of matches) {
           const cond = [result.row?.rarity, result.row?.condition].filter(Boolean).map((x) => ` [${x}]`).join("");
-          list.append(el("li", { text: `${result.row?.printedId || result.row?.requestedId || "Batch"}${cond}: ${result.message || key}` }));
+          list.append(el("li", { text: `${result.row?.printedId || result.row?.originalId || "Batch"}${cond}: ${result.message || key}` }));
         }
         return el("section", { className: "result-group" }, el("h3", { text: `${label} (${matches.length})` }), list);
       }).filter(Boolean);
       const hasUnknown = combined.some((r) => r.outcome === "unknown");
       const report = groups.flatMap(([key, label]) => combined.filter((r) => r.outcome === key).map((r) => {
         const cond = [r.row?.rarity, r.row?.condition].filter(Boolean).map((x) => ` [${x}]`).join("");
-        return `${label}: ${r.row?.printedId || r.row?.requestedId || "Batch"}${cond} \u2014 ${r.message || key}`;
+        return `${label}: ${r.row?.printedId || r.row?.originalId || "Batch"}${cond} \u2014 ${r.message || key}`;
       })).join("\n");
       const copy = el("button", { type: "button", text: "Copy report", onClick: async () => {
         try {
@@ -2142,36 +2035,12 @@ ${overStock.join("\n")}` : ""
   }
 
   // src/main.js
-  function uiRow(row) {
-    const product = row.product;
-    return {
-      ...row,
-      requestedId: row.originalIds?.[0] ?? row.originalId ?? row.normalizedId,
-      printedId: row.canonicalPrintedId ?? product?.printedId ?? null,
-      stock: row.availableStock,
-      gid: product?.gid,
-      ver: product?.ver,
-      cid: product?.cid,
-      kizu: row.kizu ?? product?.kizu,
-      condition: row.condition ?? product?.condition ?? (product?.kizu === "0" ? "normal" : "damaged"),
-      limit: product?.limit
-    };
-  }
   mountApp({
     parse: parseInput,
-    async resolve(requests, options = {}) {
-      const resolved = await lookupProducts(requests, {
-        signal: options.signal,
-        conditionPreference: options.conditionPreference,
-        onProgress: options.onProgress
-      });
-      return resolved.rows.map(uiRow);
+    async resolve(requests, { signal, conditionPreference, onProgress } = {}) {
+      const { rows } = await lookupProducts(requests, { signal, conditionPreference, onProgress });
+      return rows;
     },
-    addItems(rows, options = {}) {
-      return addCartItems(rows, {
-        cancelSignal: options.cancelSignal,
-        onProgress: options.onProgress
-      });
-    }
+    addItems: (items, { cancelSignal, onProgress } = {}) => addCartItems(items, { cancelSignal, onProgress })
   });
 })();

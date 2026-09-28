@@ -1,5 +1,5 @@
 import { ERROR_CODES } from "./errors.js";
-import { normalizePrintedId } from "./parser.js";
+import { extractPrintedId, normalizePrintedId } from "./parser.js";
 
 const INTEGER_PATTERN = /^\d+$/u;
 const CARD_TOKEN_PATTERN = /^\S+$/u;
@@ -71,6 +71,22 @@ function parseLine(raw, lineNumber) {
         lineNumber,
         raw,
         message: "Card ID is required and may not contain whitespace.",
+      }),
+    };
+  }
+
+  // Search results are read with the same pattern, so an ID it would not
+  // read whole can never match a product; reject it here rather than
+  // spending a search on it.
+  if (extractPrintedId(originalId) !== originalId) {
+    return {
+      kind: "error",
+      error: makeInputError({
+        lineNumber,
+        raw,
+        original: originalId,
+        normalizedId,
+        message: `"${originalId}" is not a Weiss Schwarz card ID such as Kka/W102-005SEC.`,
       }),
     };
   }

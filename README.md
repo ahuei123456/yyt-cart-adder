@@ -45,7 +45,7 @@ Some sets list two products under one printed ID. On RZ/SE35, for example, `RZ/S
 - Every other rarity for that ID shows in the review table with quantity 0. Raise it there to add copies of that rarity instead of, or as well as, the first one.
 - To choose up front, add the rarity in uppercase: `RZ/SE35-01 2 S-RR` or `RZ/SE35-01,1,damaged,RR`. Only that rarity is then matched.
 
-Quantities must be integers from 1 through 99. Duplicate lines for the same card, condition and rarity are aggregated. Review every resolved line before adding it. Lines that end up on the same product are added in one request, and the review won't let their combined quantity exceed YYT's stock.
+The first token on a line must be a printed card ID such as `Kka/W102-005SEC`; anything else is reported as an input error without being searched. Quantities must be integers from 1 through 99. Duplicate lines for the same card, condition and rarity are aggregated. Review every resolved line before adding it. Lines that end up on the same product are added in one request, and the review won't let their combined quantity exceed YYT's stock.
 
 ## Development
 
@@ -58,9 +58,9 @@ npm run build
 
 Development dependencies are used only to build the single installable userscript and to run tests (the UI tests use happy-dom). The committed `dist` file does not require a local build.
 
-`dist` is committed because it is the install and update URL. Rebuild it with every source change; CI fails if it is out of date. To release, bump `version` in `package.json` and rebuild. The build writes that version into the userscript header, and Tampermonkey only offers an update when it increases; CI fails if `dist` changes without a version bump.
+`dist` is committed because it is the install and update URL. Rebuild it with every source change; CI fails if it is out of date. To release, bump `version` in `package.json`, add a matching `## <version>` entry to [`CHANGELOG.md`](CHANGELOG.md), and rebuild. The build writes that version into the userscript header, and Tampermonkey only offers an update when it increases; CI fails if `dist` changes without a version bump, or if the changelog has no entry for the current version.
 
-A weekly workflow (`scripts/site-check.mjs`, also runnable by hand) resolves a known card and loads a CSRF token on the live site, so a change to YYT's pages is caught before it breaks a real order. [`docs/MVP_HANDOFF.md`](docs/MVP_HANDOFF.md) holds the original research into YYT's pages and cart endpoint.
+A weekly workflow (`scripts/site-check.mjs`, also runnable by hand) parses every card on two prefix pages, resolves a known card, checks that an ID sold in two rarities still reads as two, and loads a CSRF token on the live site, so a change to YYT's pages is caught before it breaks a real order. [`docs/MVP_HANDOFF.md`](docs/MVP_HANDOFF.md) holds the original research into YYT's pages and cart endpoint.
 
 ## Safety notes
 

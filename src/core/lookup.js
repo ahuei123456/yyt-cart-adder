@@ -4,7 +4,7 @@ import {
   parseSearchResults,
 } from "./parser.js";
 import { ERROR_CODES, YytError } from "./errors.js";
-import { withRequestDeadline } from "./request.js";
+import { notify, responseOk, responseStatus, wait, withRequestDeadline } from "./request.js";
 
 export const LOOKUP_ERROR_CODES = Object.freeze({
   NETWORK: ERROR_CODES.LOOKUP_NETWORK,
@@ -30,105 +30,25 @@ function requestId(value) {
   return String(value.originalId ?? value.originalIds?.[0] ?? "").trim();
 }
 
-function requestQuantity(value) {
-  if (!value || typeof value !== "object") return 1;
-  return value.requestedQuantity ?? 1;
-}
-
-function sourceLines(value) {
-  const lines = value?.sourceLines;
-  return Array.isArray(lines) ? lines.filter((line) => Number.isInteger(line)) : [];
-}
-
-function isValidQuantity(value) {
-  return (
-    (typeof value === "number" || typeof value === "string") &&
-    /^\d+$/u.test(String(value).trim()) &&
-    Number.isSafeInteger(Number(value)) &&
-    Number(value) >= 1 &&
-    Number(value) <= 99
-  );
-}
-
+/**
+ * Turn a parsed request (see `parseInput`) or a bare ID string into the
+ * shape lookup works with.  `parseInput` has already validated quantities and
+ * merged duplicate lines, so nothing is re-checked here.
+ */
 function makeRequest(value, index) {
-  const printedId = requestId(value);
-  const normalizedId = normalizePrintedId(
-    value && typeof value === "object" && value.normalizedId
-      ? value.normalizedId
-      : printedId,
-  );
-  const rawQuantity = requestQuantity(value);
-  const validQuantity = isValidQuantity(rawQuantity);
-  const requestedQuantity = validQuantity ? Number(rawQuantity) : Number(rawQuantity) || 0;
-  const originals =
-    value && typeof value === "object" && Array.isArray(value.originalIds)
-      ? value.originalIds.map((id) => String(id))
-      : printedId
-        ? [printedId]
-        : [];
-  const condition =
-    value && typeof value === "object" && typeof value.condition === "string"
-      ? value.condition
-      : null;
-  const rarity =
-    value && typeof value === "object" ? normalizeRarity(value.rarity) : null;
-
+  const fields = typeof value === "string" ? { originalIds: [value] } : value;
+  const originalIds = (fields.originalIds ?? [fields.originalId]).map((id) => String(id).trim());
+  const rarity = normalizeRarity(fields.rarity);
   return {
-    originalId: printedId || originals[0] || String(value?.normalizedId ?? ""),
-    originalIds: originals,
-    normalizedId,
-    ...(condition ? { condition } : {}),
+    originalId: originalIds[0],
+    originalIds,
+    normalizedId: fields.normalizedId ?? normalizePrintedId(originalIds[0]),
+    ...(fields.condition ? { condition: fields.condition } : {}),
     ...(rarity ? { rarity } : {}),
-    requestedQuantity,
-    sourceLines: sourceLines(value),
+    requestedQuantity: fields.requestedQuantity ?? 1,
+    sourceLines: fields.sourceLines ?? [],
     inputIndex: index,
-    invalid: !printedId || !normalizedId || !validQuantity,
-    invalidReason: !printedId
-      ? "missing printed ID"
-      : !validQuantity
-        ? "quantity must be an integer from 1 through 99"
-        : null,
   };
-}
-
-function mergeRequest(existing, incoming) {
-  if (!existing) return incoming;
-  existing.originalIds.push(...incoming.originalIds);
-  existing.sourceLines.push(...incoming.sourceLines);
-  if (existing.invalid || incoming.invalid) {
-    existing.invalid = true;
-    existing.invalidReason = existing.invalidReason ?? incoming.invalidReason;
-  }
-
-  // Invalid quantities remain invalid, but retaining their sum makes the row
-  // explainable in a review report.  A duplicate aggregate above 99 is also
-  // invalid per the MVP input contract.
-  existing.requestedQuantity += incoming.requestedQuantity;
-  if (existing.requestedQuantity > 99) {
-    existing.invalid = true;
-    existing.invalidReason = "duplicate quantity total exceeds 99";
-  }
-  return existing;
-}
-
-function normalizeRequests(requests) {
-  if (!Array.isArray(requests)) {
-    throw new TypeError("lookup requests must be an array");
-  }
-
-  const byId = new Map();
-  const invalidWithoutId = [];
-  requests.forEach((value, index) => {
-    const request = makeRequest(value, index);
-    if (!request.normalizedId) {
-      invalidWithoutId.push(request);
-      return;
-    }
-    const key = `${request.normalizedId}:${request.condition ?? ""}:${request.rarity ?? ""}`;
-    const existing = byId.get(key);
-    byId.set(key, mergeRequest(existing, request));
-  });
-  return [...byId.values(), ...invalidWithoutId];
 }
 
 /**
@@ -202,17 +122,6 @@ function makeSearchUrl(query, options) {
   return url.toString();
 }
 
-function responseStatus(response) {
-  const status = Number(response?.status);
-  return Number.isInteger(status) && status > 0 ? status : response?.ok === false ? 0 : 200;
-}
-
-function responseOk(response) {
-  if (typeof response?.ok === "boolean") return response.ok;
-  const status = responseStatus(response);
-  return status >= 200 && status < 300;
-}
-
 function retryAfterMilliseconds(response) {
   const header = response?.headers?.get?.("Retry-After") ?? response?.headers?.["Retry-After"];
   if (header == null) return null;
@@ -237,20 +146,8 @@ async function sleep(milliseconds, options) {
     await options.sleep(milliseconds);
     return;
   }
-  const signal = options.signal;
-  const cancelled = () => new DOMException("The lookup was cancelled", "AbortError");
-  if (signal?.aborted) throw cancelled();
-  await new Promise((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(cancelled());
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, milliseconds);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
+  await wait(milliseconds, options.signal);
+  if (options.signal?.aborted) throw new DOMException("The lookup was cancelled", "AbortError");
 }
 
 function isAbortError(error) {
@@ -345,37 +242,29 @@ function numbersForProduct(product) {
   };
 }
 
-function makeInvalidRow(request) {
+/**
+ * A row with no product to add: missing, ambiguous, or its search failed.
+ */
+function unresolvedRow(request, status, reason, extra = {}) {
   return {
     ...request,
-    status: "invalid",
-    reason: ERROR_CODES.INPUT_INVALID,
-    canonicalPrintedId: null,
-    product: null,
-    name: "",
-    priceYen: null,
-    availableStock: 0,
-    plannedQuantity: 0,
-    selected: false,
-    condition: request.condition ?? null,
-  };
-}
-
-function makeMissingRow(request, reason = ERROR_CODES.PRODUCT_MISSING) {
-  return {
-    ...request,
-    status: "missing",
+    status,
     reason,
-    canonicalPrintedId: null,
+    printedId: null,
     product: null,
     name: "",
     priceYen: null,
-    availableStock: 0,
+    stock: 0,
     plannedQuantity: 0,
     selected: false,
     candidates: [],
     condition: request.condition ?? null,
+    ...extra,
   };
+}
+
+function makeMissingRow(request, reason = ERROR_CODES.PRODUCT_MISSING) {
+  return unresolvedRow(request, "missing", reason);
 }
 
 /**
@@ -383,38 +272,11 @@ function makeMissingRow(request, reason = ERROR_CODES.PRODUCT_MISSING) {
  * rows resolved by other searches in the same lookup are still usable.
  */
 function makeErrorRow(request, error) {
-  return {
-    ...request,
-    status: "error",
-    reason: error.code,
-    errorMessage: error.message,
-    canonicalPrintedId: null,
-    product: null,
-    name: "",
-    priceYen: null,
-    availableStock: 0,
-    plannedQuantity: 0,
-    selected: false,
-    candidates: [],
-    condition: request.condition ?? null,
-  };
+  return unresolvedRow(request, "error", error.code, { errorMessage: error.message });
 }
 
 function makeAmbiguousRow(request, candidates) {
-  return {
-    ...request,
-    status: "ambiguous",
-    reason: ERROR_CODES.PRODUCT_AMBIGUOUS,
-    canonicalPrintedId: null,
-    product: null,
-    name: "",
-    priceYen: null,
-    availableStock: 0,
-    plannedQuantity: 0,
-    selected: false,
-    candidates,
-    condition: request.condition ?? null,
-  };
+  return unresolvedRow(request, "ambiguous", ERROR_CODES.PRODUCT_AMBIGUOUS, { candidates });
 }
 
 function buildRow(request, product, plannedQuantity, stock, statusOverride = null) {
@@ -435,14 +297,14 @@ function buildRow(request, product, plannedQuantity, stock, statusOverride = nul
         : status === "partial"
           ? ERROR_CODES.PRODUCT_PARTIAL_STOCK
           : ERROR_CODES.PRODUCT_SOLD_OUT,
-    canonicalPrintedId: product.printedId,
+    printedId: product.printedId,
     rarity: product.rarity ?? null,
     condition: product.condition || (product.kizu === "0" ? "normal" : "damaged"),
     kizu: product.kizu,
     product,
     name: product.name ?? "",
     priceYen: product.priceYen ?? null,
-    availableStock: stock,
+    stock,
     plannedQuantity,
     selected: plannedQuantity > 0,
     candidates: [product],
@@ -521,8 +383,6 @@ function groupByRarity(candidates) {
  * An explicit rarity in the input restricts matching to that rarity.
  */
 export function makeRows(request, candidates, options = {}) {
-  if (request.invalid) return [makeInvalidRow(request)];
-
   const exact = candidates ?? [];
   if (exact.length === 0) {
     return [makeMissingRow(request)];
@@ -609,15 +469,6 @@ function makeConditionRows(request, exact, options) {
   return [makeMissingRow(request)];
 }
 
-function notifyProgress(options, progress) {
-  if (typeof options.onProgress !== "function") return;
-  try {
-    options.onProgress(progress);
-  } catch {
-    // A UI callback must never interrupt a lookup.
-  }
-}
-
 async function delayBetweenQueries(options, queryNumber) {
   const delay = Number.isFinite(options.delayMs) ? Math.max(0, options.delayMs) : 250;
   if (queryNumber > 0) await sleep(delay, options);
@@ -660,19 +511,18 @@ function assertStructure(parsed, query, expectedIds) {
  * hit with a request per card.  Cancellation still rejects the whole lookup.
  */
 export async function lookupProducts(requests, options = {}) {
-  const normalizedRequests = normalizeRequests(requests);
-  const validRequests = normalizedRequests.filter((request) => !request.invalid);
-  const expectedIds = new Set(validRequests.map((request) => request.normalizedId));
+  const normalizedRequests = requests.map(makeRequest);
+  const expectedIds = new Set(normalizedRequests.map((request) => request.normalizedId));
   const candidatesById = new Map();
   const failuresById = new Map();
   const queries = [];
-  const { groups, fallbackIds } = buildLookupPlan(validRequests);
+  const { groups, fallbackIds } = buildLookupPlan(normalizedRequests);
 
   let queryNumber = 0;
   const runQuery = async (type, query, queryIds, progress) => {
     await delayBetweenQueries(options, queryNumber);
     queryNumber += 1;
-    notifyProgress(options, { type, query, ...progress });
+    notify(options.onProgress, { type, query, ...progress });
     try {
       const page = await fetchSearchPage(query, options);
       const parsed = parseSearchResults(page.html);
@@ -699,7 +549,7 @@ export async function lookupProducts(requests, options = {}) {
     groupIndex += 1;
   }
 
-  for (const request of validRequests) {
+  for (const request of normalizedRequests) {
     if (!candidatesById.has(request.normalizedId) && !failuresById.has(request.normalizedId)) {
       fallbackIds.push(request);
     }
@@ -726,7 +576,7 @@ export async function lookupProducts(requests, options = {}) {
     normalizedRequests.flatMap((request) => {
       // Another search can still return this ID's product; only an ID with
       // no candidates at all is reported as failed.
-      const failure = request.invalid || candidatesById.has(request.normalizedId)
+      const failure = candidatesById.has(request.normalizedId)
         ? null
         : failuresById.get(request.normalizedId);
       return failure

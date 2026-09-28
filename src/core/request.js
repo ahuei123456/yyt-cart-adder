@@ -23,3 +23,42 @@ export async function withRequestDeadline(run, options = {}) {
     controller.signal.removeEventListener("abort", stop);
   }
 }
+
+/** A response's HTTP status, or null when it has none. */
+export function responseStatus(response) {
+  const status = Number(response?.status);
+  return Number.isInteger(status) && status > 0 ? status : null;
+}
+
+export function responseOk(response) {
+  if (typeof response?.ok === "boolean") return response.ok;
+  const status = responseStatus(response);
+  return status !== null && status >= 200 && status < 300;
+}
+
+/** Resolve after `milliseconds`, or as soon as `signal` aborts. */
+export function wait(milliseconds, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, milliseconds);
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+/** Call a progress callback; a UI callback must never interrupt the caller. */
+export function notify(callback, value) {
+  if (typeof callback !== "function") return;
+  try {
+    callback(value);
+  } catch {
+    // Ignored on purpose.
+  }
+}

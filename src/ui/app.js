@@ -1,5 +1,5 @@
 import { ERROR_CODES } from "../core/errors.js";
-import { productKey } from "../core/lookup.js";
+import { MAX_COPIES, isSelectable, mergeByProduct, summarizeReview } from "./review.js";
 import { styles } from "./styles.js";
 
 const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 });
@@ -136,7 +136,7 @@ export function mountApp({ parse, resolve, addItems }) {
 
   async function showResolving(parsed, source, conditionPreference = "prefer-normal") {
     lookupController = new AbortController();
-    const message = el("p", { text: `Resolving ${parsed.requests.length} distinct card requests…` });
+    const message = el("p", { role: "status", text: `Resolving ${parsed.requests.length} distinct card requests…` });
     const cancel = el("button", { type: "button", text: "Cancel", onClick: () => lookupController.abort() });
     setView(el("h3", { text: "Resolving" }), message, el("progress", { className: "progress" }), el("div", { className: "actions" }, cancel));
     const { signal } = lookupController;
@@ -153,7 +153,7 @@ export function mountApp({ parse, resolve, addItems }) {
       const invalidRows = parsed.errors.map((item) => ({
         ...item,
         status: "invalid",
-        requestedId: item.original || "—",
+        originalId: item.original || "—",
         requestedQuantity: 0,
         plannedQuantity: 0,
       }));
@@ -168,10 +168,9 @@ export function mountApp({ parse, resolve, addItems }) {
   }
 
   function showReview(rows, source, conditionPreference = "prefer-normal") {
-    const isRowSelectable = (r) => (r.status === "ready" || r.status === "partial" || r.status === "option") && (r.stock ?? r.availableStock ?? 0) > 0;
     for (const row of rows) {
       if (typeof row.selected !== "boolean") {
-        row.selected = isRowSelectable(row) && row.plannedQuantity > 0;
+        row.selected = isSelectable(row) && row.plannedQuantity > 0;
       }
     }
     const tbody = el("tbody");
@@ -182,13 +181,8 @@ export function mountApp({ parse, resolve, addItems }) {
     const submit = el("button", { className: "primary", type: "button" });
 
     const update = () => {
-      const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
-      const totalCards = chosen.reduce((n, r) => n + r.plannedQuantity, 0);
-      const normalCards = chosen.filter((r) => r.condition !== "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
-      const damagedCards = chosen.filter((r) => r.condition === "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
-      const total = chosen.reduce((n, r) => n + (r.priceYen || 0) * r.plannedQuantity, 0);
-
-      const productCount = new Set(chosen.map((r) => productKey(r.product) ?? r)).size;
+      const summary = summarizeReview(rows);
+      const { totalCards, normalCards, damagedCards, productCount } = summary;
       let desc = `${productCount} product${productCount === 1 ? "" : "s"} / ${totalCards} card${totalCards === 1 ? "" : "s"}`;
       if (damagedCards > 0 && normalCards > 0) {
         desc += ` (${normalCards} normal, ${damagedCards} damaged)`;
@@ -197,59 +191,32 @@ export function mountApp({ parse, resolve, addItems }) {
       }
       countText.textContent = desc;
 
-      // A request can be split across conditions and rarities; flag it when
-      // the rows together add more copies than were asked for.
-      const byRequest = new Map();
-      for (const r of rows) {
-        if (!Number.isInteger(r.inputIndex)) continue;
-        if (!byRequest.has(r.inputIndex)) byRequest.set(r.inputIndex, []);
-        byRequest.get(r.inputIndex).push(r);
+      for (const tr of rowElements.values()) tr.classList.remove("over");
+      for (const group of [...summary.overRequested, ...summary.overStock]) {
+        for (const r of group.rows) rowElements.get(r)?.classList.add("over");
       }
-      const over = [];
-      for (const group of byRequest.values()) {
-        const adding = group.filter((r) => r.selected).reduce((n, r) => n + (r.plannedQuantity || 0), 0);
-        const requested = group[0].requestedQuantity || 0;
-        const isOver = group.length > 1 && adding > requested;
-        for (const r of group) rowElements.get(r)?.classList.toggle("over", isOver);
-        if (isOver) over.push(`${group[0].requestedId || group[0].originalId}: adding ${adding}, requested ${requested}`);
-      }
-
-      // Different lines can still resolve to the same product (`ID 2` and
-      // `ID 1 normal`); each row is capped at stock but their sum may not be.
-      const byProduct = new Map();
-      for (const r of rows) {
-        const key = productKey(r.product);
-        if (!key) continue;
-        if (!byProduct.has(key)) byProduct.set(key, []);
-        byProduct.get(key).push(r);
-      }
-      const overStock = [];
-      for (const group of byProduct.values()) {
-        const adding = group.filter((r) => r.selected).reduce((n, r) => n + (r.plannedQuantity || 0), 0);
-        const stock = Math.min(99, ...group.map((r) => r.stock ?? r.availableStock ?? 0));
-        const isOver = group.length > 1 && adding > stock;
-        for (const r of group) if (isOver) rowElements.get(r)?.classList.add("over");
-        if (isOver) overStock.push(`${group[0].printedId} (${group[0].condition}): adding ${adding} across lines, maximum ${stock} allowed`);
-      }
-
+      const over = summary.overRequested.map(({ rows: [first], adding, requested }) =>
+        `${first.originalId}: adding ${adding}, requested ${requested}`);
+      const overStock = summary.overStock.map(({ rows: [first], adding, max }) =>
+        `${first.printedId} (${first.condition}): adding ${adding} across lines, maximum ${max} allowed`);
       const messages = [
         over.length ? `More copies than requested:\n${over.join("\n")}` : "",
         overStock.length ? `More than YYT has in stock or the 99-copy limit; lower a quantity to continue:\n${overStock.join("\n")}` : "",
       ].filter(Boolean);
       overWarning.hidden = !messages.length;
       overWarning.textContent = messages.join("\n\n");
-      totalText.textContent = `Estimated selected total: ${yen.format(total)}`;
+      totalText.textContent = `Estimated selected total: ${yen.format(summary.totalYen)}`;
       submit.textContent = `Add ${totalCards} card${totalCards === 1 ? "" : "s"} from ${productCount} product${productCount === 1 ? "" : "s"}`;
-      submit.disabled = !chosen.length || overStock.length > 0;
+      submit.disabled = !summary.chosen.length || overStock.length > 0;
     };
 
     for (const row of rows) {
-      const stock = row.stock ?? row.availableStock ?? 0;
-      const quantityLimit = Math.min(stock, 99);
-      const selectable = isRowSelectable(row);
+      const stock = row.stock ?? 0;
+      const quantityLimit = Math.min(stock, MAX_COPIES);
+      const selectable = isSelectable(row);
       const checkbox = el("input", {
         type: "checkbox",
-        "aria-label": `Select ${row.requestedId || row.printedId || "card"}`,
+        "aria-label": `Select ${row.originalId || row.printedId || "card"}`,
       });
       checkbox.checked = Boolean(row.selected && row.plannedQuantity > 0);
       checkbox.disabled = !selectable;
@@ -262,7 +229,7 @@ export function mountApp({ parse, resolve, addItems }) {
           min: 0,
           max: quantityLimit,
           value: String(row.plannedQuantity ?? 0),
-          "aria-label": `Quantity for ${row.printedId || row.requestedId}`,
+          "aria-label": `Quantity for ${row.printedId || row.originalId}`,
         });
         qtyInput.addEventListener("input", () => {
           let val = Number(qtyInput.value);
@@ -304,7 +271,7 @@ export function mountApp({ parse, resolve, addItems }) {
       const isOption = row.status === "option";
       const tr = el("tr", { className: [row.status === "partial" ? "partial" : selectable ? "" : "unavailable", isOption ? "alt" : ""].filter(Boolean).join(" ") },
         el("td", {}, checkbox),
-        el("td", { text: row.requestedId || row.originalIds?.[0] || "—" }),
+        el("td", { text: row.originalId || "—" }),
         el("td", { text: row.printedId || "—" }),
         el("td", { className: "rarity", text: row.rarity ? `${isOption ? "↳ " : ""}${row.rarity}` : "—" }),
         el("td", {}, condBadge),
@@ -325,7 +292,7 @@ export function mountApp({ parse, resolve, addItems }) {
       el("thead", {}, el("tr", {}, ...["Use", "Requested ID", "YYT ID", "Rarity", "Cond.", "Name", "Price", "Requested", "Stock", "Adding", "Status"].map((x) => el("th", { text: x })))), tbody);
     submit.addEventListener("click", async () => {
       if (adding) return;
-      const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
+      const { chosen } = summarizeReview(rows);
       if (chosen.length) await runBatch(rows, chosen);
     });
     update();
@@ -343,18 +310,11 @@ export function mountApp({ parse, resolve, addItems }) {
   async function runBatch(allRows, chosen) {
     adding = true;
     // Lines that resolve to the same product go to the cart as one request.
-    const byProduct = new Map();
-    for (const row of chosen) {
-      const key = productKey(row.product) ?? row;
-      const merged = byProduct.get(key);
-      if (merged) merged.plannedQuantity += row.plannedQuantity;
-      else byProduct.set(key, { ...row });
-    }
-    const items = [...byProduct.values()];
+    const items = mergeByProduct(chosen);
     const cancelController = new AbortController();
     const describe = (row, index) =>
       `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${items.length})…`;
-    const current = el("p", { text: describe(items[0], 0) });
+    const current = el("p", { role: "status", text: describe(items[0], 0) });
     const progress = el("progress", { className: "progress", max: items.length, value: 0 });
     const cancel = el("button", { className: "danger", type: "button", text: "Cancel before next item", onClick: () => {
       cancelController.abort();
@@ -399,14 +359,14 @@ export function mountApp({ parse, resolve, addItems }) {
       const list = el("ul");
       for (const result of matches) {
         const cond = [result.row?.rarity, result.row?.condition].filter(Boolean).map((x) => ` [${x}]`).join("");
-        list.append(el("li", { text: `${result.row?.printedId || result.row?.requestedId || "Batch"}${cond}: ${result.message || key}` }));
+        list.append(el("li", { text: `${result.row?.printedId || result.row?.originalId || "Batch"}${cond}: ${result.message || key}` }));
       }
       return el("section", { className: "result-group" }, el("h3", { text: `${label} (${matches.length})` }), list);
     }).filter(Boolean);
     const hasUnknown = combined.some((r) => r.outcome === "unknown");
     const report = groups.flatMap(([key, label]) => combined.filter((r) => r.outcome === key).map((r) => {
       const cond = [r.row?.rarity, r.row?.condition].filter(Boolean).map((x) => ` [${x}]`).join("");
-      return `${label}: ${r.row?.printedId || r.row?.requestedId || "Batch"}${cond} — ${r.message || key}`;
+      return `${label}: ${r.row?.printedId || r.row?.originalId || "Batch"}${cond} — ${r.message || key}`;
     })).join("\n");
     // Refer to the button directly: event.currentTarget is null once the
     // handler resumes after the clipboard await.

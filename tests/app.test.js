@@ -41,7 +41,7 @@ const flush = async () => {
 
 function readyRow(overrides = {}) {
   return {
-    requestedId: "Kka/W102-005SEC",
+    originalId: "Kka/W102-005SEC",
     printedId: "Kka/W102-005SEC",
     rarity: "SEC",
     condition: "normal",
@@ -186,7 +186,7 @@ test("lookup progress is shown while resolving", async (t) => {
   });
   ui.button("Bulk add WS cards").click();
   await ui.resolveInput();
-  assert.match(ui.root.textContent, /Searching Kka\/W102 \(1 of 2\)…/);
+  assert.match(ui.root.querySelector("[role=status]").textContent, /Searching Kka\/W102 \(1 of 2\)…/);
   lookup.resolve();
   await flush();
   assert.equal(ui.heading(), "Review matches & allocate quantities");
@@ -198,7 +198,7 @@ test("a row whose search failed is shown but cannot be selected", async (t) => {
     resolve: async () => [
       readyRow(),
       readyRow({
-        requestedId: "SMP/W99-001R",
+        originalId: "SMP/W99-001R",
         printedId: null,
         status: "error",
         reason: "LOOKUP_HTTP",
