@@ -77,7 +77,7 @@ function mount(window, { resolve, addItems }) {
   return { ...app, button, heading, pressKey, resolveInput, backdrop: root.querySelector(".backdrop") };
 }
 
-test("closing during a batch cancels it, reopening shows its progress, then its results", async (t) => {
+test("closing during a batch leaves it running, reopening shows its progress, then its results", async (t) => {
   const { window } = withDom(t);
   const batch = deferred();
   let batchOptions;
@@ -96,7 +96,7 @@ test("closing during a batch cancels it, reopening shows its progress, then its 
 
   ui.pressKey("Escape");
   assert.equal(ui.backdrop.hidden, true);
-  assert.equal(batchOptions.cancelSignal.aborted, true);
+  assert.equal(batchOptions.cancelSignal.aborted, false, "closing must not cancel the batch");
 
   ui.button("Bulk add WS cards").click();
   assert.equal(ui.heading(), "Adding products one at a time", "reopening must not reset to the input view");
@@ -112,7 +112,52 @@ test("closing during a batch cancels it, reopening shows its progress, then its 
   // Once the results have been seen, the next open starts a fresh input.
   ui.pressKey("Escape");
   ui.button("Bulk add WS cards").click();
-  assert.ok(ui.root.querySelector("#yyt-card-list"));
+  assert.equal(ui.root.querySelector("#yyt-card-list").value, "");
+});
+
+test("closing and reopening keeps the typed list and the review", async (t) => {
+  const { window } = withDom(t);
+  const ui = mount(window, {});
+  ui.button("Bulk add WS cards").click();
+  ui.root.querySelector("#yyt-card-list").value = "Kka/W102-005SEC 2";
+  ui.pressKey("Escape");
+  ui.button("Bulk add WS cards").click();
+  assert.equal(ui.root.querySelector("#yyt-card-list").value, "Kka/W102-005SEC 2");
+
+  await ui.resolveInput();
+  ui.pressKey("Escape");
+  ui.button("Bulk add WS cards").click();
+  assert.equal(ui.heading(), "Review matches & allocate quantities");
+});
+
+test("rows for the same product are added as one request and may not exceed its stock", async (t) => {
+  const { window } = withDom(t);
+  let sent;
+  const ui = mount(window, {
+    resolve: async () => [
+      readyRow({ plannedQuantity: 3, requestedQuantity: 3 }),
+      readyRow({ plannedQuantity: 3, requestedQuantity: 3, inputIndex: 1 }),
+    ],
+    addItems: async (items) => {
+      sent = items;
+      return { results: items.map(() => ({ outcome: "success", message: "Added" })) };
+    },
+  });
+  ui.button("Bulk add WS cards").click();
+  await ui.resolveInput("Kka/W102-005SEC 3\nKka/W102-005SEC 3 normal");
+
+  assert.equal(ui.button("Add ").disabled, true, "6 copies of a product with 5 in stock");
+  assert.match(ui.root.textContent, /More than YYT has in stock/);
+
+  const quantity = ui.root.querySelectorAll(".qty-input")[1];
+  quantity.value = "2";
+  quantity.dispatchEvent(new window.Event("input"));
+  assert.equal(ui.button("Add ").disabled, false);
+
+  ui.button("Add ").click();
+  await flush();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].plannedQuantity, 5);
 });
 
 test("Copy report writes the report and updates the button", async (t) => {

@@ -10,14 +10,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run lint
       - run: npm test
       - run: npm run build
       # dist/ is committed so Tampermonkey can install and auto-update from
       # it; fail when it was not rebuilt after a source change.
       - name: Check the committed build is up to date
         run: git diff --exit-code -- dist/
+      # Tampermonkey only offers an update when @version changes.
+      - name: Check the version was bumped when the build changed
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          git cat-file -e "$BASE^{commit}" 2>/dev/null || exit 0
+          git diff --quiet "$BASE" HEAD -- dist/ && exit 0
+          old=$(git show "$BASE:package.json" | node -p 'JSON.parse(require("fs").readFileSync(0)).version')
+          new=$(node -p 'require("./package.json").version')
+          if [ "$old" = "$new" ]; then
+            echo "dist/ changed but package.json is still at version $new"
+            exit 1
+          fi

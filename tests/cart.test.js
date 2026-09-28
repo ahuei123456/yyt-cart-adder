@@ -66,7 +66,7 @@ test("gets a CSRF token from /top/ws when the current page has none", async () =
 
   const token = await getCsrfToken({
     documentRef: { querySelector: () => null },
-    fetchImpl,
+    fetch: fetchImpl,
   });
 
   assert.equal(token, "fallback-token");
@@ -123,7 +123,7 @@ test("caps a just-before-dispatch quantity to current stock and limit", () => {
 
 test("handles SUCCESS JSON even when the MIME type is text/html", async () => {
   const { calls, fetchImpl } = requestCalls([response(200, '{"status":"SUCCESS"}')]);
-  const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetchImpl });
+  const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetch: fetchImpl });
 
   assert.equal(result.outcome, "success");
   assert.equal(result.attemptedQuantity, 1);
@@ -141,7 +141,7 @@ test("handles damaged card addition with kizu 1", async () => {
   const { calls, fetchImpl } = requestCalls([response(200, '{"status":"SUCCESS"}')]);
   const result = await addCartItem(product({ kizu: "1", condition: "damaged" }), 2, {
     csrfToken: "csrf",
-    fetchImpl,
+    fetch: fetchImpl,
   });
 
   assert.equal(result.outcome, "success");
@@ -153,7 +153,7 @@ test("handles damaged card addition with kizu 1", async () => {
 
 test("maps invalid JSON to a definite response failure", async () => {
   const { fetchImpl } = requestCalls([response(200, "not-json")]);
-  const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetchImpl });
+  const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetch: fetchImpl });
 
   assert.equal(result.outcome, "failed");
   assert.equal(result.code, CART_ERROR_CODES.CART_RESPONSE_INVALID);
@@ -168,7 +168,7 @@ test("classifies auth, rate-limit, and server responses as batch-stopping", asyn
     [503, CART_ERROR_CODES.CART_SERVER],
   ]) {
     const { fetchImpl } = requestCalls([response(status, '{"status":"ERROR"}', { ok: false })]);
-    const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetchImpl });
+    const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetch: fetchImpl });
     assert.equal(result.outcome, "failed");
     assert.equal(result.code, code);
     assert.equal(result.stopBatch, true);
@@ -179,7 +179,7 @@ test("a definite item-specific rejection can continue", async () => {
   const { fetchImpl } = requestCalls([
     response(400, '{"status":"ERROR","message":"out of stock"}', { ok: false }),
   ]);
-  const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetchImpl });
+  const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetch: fetchImpl });
 
   assert.equal(result.outcome, "failed");
   assert.equal(result.code, CART_ERROR_CODES.CART_REJECTED);
@@ -193,7 +193,7 @@ test("a fetch rejection is unknown and is never retried", async () => {
     calls += 1;
     throw new TypeError("connection lost");
   };
-  const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetchImpl });
+  const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetch: fetchImpl });
 
   assert.equal(calls, 1);
   assert.equal(result.outcome, "unknown");
@@ -212,7 +212,7 @@ test("batch mutation is sequential, applies the delay, and uses fresh timestamps
     { product: product({ cid: "2" }), plannedQuantity: 2 },
   ], {
     csrfToken: "csrf",
-    fetchImpl,
+    fetch: fetchImpl,
     now: (() => {
       let n = 0;
       return () => new Date(`2026-09-02T00:00:0${n++}.000Z`);
@@ -237,7 +237,7 @@ test("batch stops after an unknown outcome and never sends a later mutation", as
   const result = await addCartItems([
     { product: product({ cid: "1" }), plannedQuantity: 1 },
     { product: product({ cid: "2" }), plannedQuantity: 1 },
-  ], { csrfToken: "csrf", fetchImpl, delayMs: 0 });
+  ], { csrfToken: "csrf", fetch: fetchImpl, delayMs: 0 });
 
   assert.equal(calls.length, 1);
   assert.deepEqual(result.results.map((item) => item.outcome), ["unknown", "skipped"]);
@@ -250,17 +250,17 @@ test("batch cancellation skips future items without undoing a success", async ()
     response(200, '{"status":"SUCCESS"}'),
     response(200, '{"status":"SUCCESS"}'),
   ]);
-  let cancelled = false;
+  const controller = new AbortController();
   const result = await addCartItems([
     { product: product({ cid: "1" }), plannedQuantity: 1 },
     { product: product({ cid: "2" }), plannedQuantity: 1 },
   ], {
     csrfToken: "csrf",
-    fetchImpl,
+    fetch: fetchImpl,
     delayMs: 0,
-    isCancelled: () => cancelled,
+    cancelSignal: controller.signal,
     onProgress: ({ result: itemResult }) => {
-      if (itemResult.outcome === "success") cancelled = true;
+      if (itemResult.outcome === "success") controller.abort();
     },
   });
 
@@ -281,7 +281,7 @@ test("cancelSignal ends the delay between items and is never passed to fetch", a
     { product: product({ cid: "2" }), plannedQuantity: 1 },
   ], {
     csrfToken: "csrf",
-    fetchImpl,
+    fetch: fetchImpl,
     delayMs: 60_000,
     cancelSignal: controller.signal,
     // Cancel while the batch is waiting between the two items.
@@ -296,12 +296,12 @@ test("cancelSignal ends the delay between items and is never passed to fetch", a
 });
 
 test("missing CSRF token prevents every cart mutation", async () => {
-  const { calls, fetchImpl } = requestCalls([]);
+  const { calls } = requestCalls([]);
   const result = await addCartItems([
     { product: product(), plannedQuantity: 1 },
   ], {
     documentRef: { querySelector: () => null },
-    fetchImpl: async (...args) => {
+    fetch: async (...args) => {
       calls.push(args);
       return response(200, "<html>no token</html>");
     },

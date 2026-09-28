@@ -26,25 +26,16 @@ export class LookupError extends YytError {
 function requestId(value) {
   if (typeof value === "string") return value.trim();
   if (!value || typeof value !== "object") return "";
-  const originals = Array.isArray(value.originalIds) ? value.originalIds : [];
-  return String(
-    value.originalId ??
-      value.printedId ??
-      value.id ??
-      originals[0] ??
-      value.normalizedId ??
-      "",
-  ).trim();
+  return String(value.originalId ?? value.originalIds?.[0] ?? "").trim();
 }
 
 function requestQuantity(value) {
-  if (typeof value === "string" || !value || typeof value !== "object") return 1;
-  return value.requestedQuantity ?? value.quantity ?? value.count ?? 1;
+  if (!value || typeof value !== "object") return 1;
+  return value.requestedQuantity ?? 1;
 }
 
 function sourceLines(value) {
-  if (!value || typeof value !== "object") return [];
-  const lines = value.sourceLines ?? value.lineNumbers ?? [];
+  const lines = value?.sourceLines;
   return Array.isArray(lines) ? lines.filter((line) => Number.isInteger(line)) : [];
 }
 
@@ -182,19 +173,11 @@ export function groupIdsByPrefix(values) {
 export function buildLookupPlan(values) {
   const groups = groupIdsByPrefix(values);
   const groupedValues = new Set([...groups.values()].flat());
-  const fallbackIds = values.filter((value) => !groupedValues.has(value));
-  return {
-    groups,
-    prefixGroups: groups,
-    prefixQueries: [...groups.keys()],
-    fallbackIds,
-    exactIds: fallbackIds,
-  };
+  return { groups, fallbackIds: values.filter((value) => !groupedValues.has(value)) };
 }
 
 function getFetch(options) {
-  const fetchFunction = options.fetch ?? options.fetchFn ?? options.fetchImpl;
-  if (typeof fetchFunction === "function") return fetchFunction;
+  if (typeof options.fetch === "function") return options.fetch;
   if (typeof globalThis !== "undefined" && typeof globalThis.fetch === "function") {
     return globalThis.fetch.bind(globalThis);
   }
@@ -206,7 +189,6 @@ function getFetch(options) {
 
 function getOrigin(options) {
   if (options.origin) return String(options.origin);
-  if (options.baseUrl) return String(options.baseUrl);
   if (typeof globalThis !== "undefined" && globalThis.location?.origin) {
     return globalThis.location.origin;
   }
@@ -214,10 +196,7 @@ function getOrigin(options) {
 }
 
 function makeSearchUrl(query, options) {
-  if (typeof options.buildSearchUrl === "function") {
-    return options.buildSearchUrl(query);
-  }
-  const url = new URL(options.searchPath ?? "/sell/ws/s/search", getOrigin(options));
+  const url = new URL("/sell/ws/s/search", getOrigin(options));
   url.searchParams.set("search_word", query);
   return url.toString();
 }
@@ -343,21 +322,6 @@ export async function fetchSearchPage(query, options = {}) {
 
     return { query: String(query), url, status, html, response };
   }
-}
-
-function parserReport(html, options) {
-  const parser = options.parseSearchResults ?? options.parser;
-  const parsed = typeof parser === "function" ? parser(html, options) : parseSearchResults(html, options);
-  if (Array.isArray(parsed)) {
-    return {
-      products: parsed,
-      rejected: [],
-      cardProductCount: parsed.length,
-      structureError: false,
-      explicitEmpty: parsed.length === 0,
-    };
-  }
-  return parsed;
 }
 
 function matchingProducts(products, normalizedIds) {
@@ -638,38 +602,19 @@ function makeConditionRows(request, exact, options) {
   }
 
   if (normal.length === 1 && damaged.length === 1) {
-    const totalRequested = request.requestedQuantity;
-    const normalStock = numbersForProduct(normal[0]).stock;
-    const damagedStock = numbersForProduct(damaged[0]).stock;
-
-    if (preference === "prefer-damaged") {
-      const damagedPlanned = Math.min(totalRequested, damagedStock);
-      const normalPlanned = Math.min(Math.max(0, totalRequested - damagedPlanned), normalStock);
-      const totalAllocated = damagedPlanned + normalPlanned;
-      const damagedStatus = damagedStock <= 0 ? "sold-out" : (totalAllocated < totalRequested ? "partial" : "ready");
-      const normalStatus = normalStock <= 0 ? "sold-out" : (totalAllocated < totalRequested ? "partial" : "ready");
-
-      const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
-      damagedRow.selected = damagedPlanned > 0;
-      const normalRow = buildRow(request, normal[0], normalPlanned, normalStock, normalStatus);
-      normalRow.selected = normalPlanned > 0;
-      // A fallback the preferred condition fully covered adds nothing; show
-      // it like any other zero-quantity option.
-      return [damagedRow, normalPlanned > 0 ? normalRow : asOption(normalRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
-    } else {
-      // prefer-normal
-      const normalPlanned = Math.min(totalRequested, normalStock);
-      const damagedPlanned = Math.min(Math.max(0, totalRequested - normalPlanned), damagedStock);
-      const totalAllocated = normalPlanned + damagedPlanned;
-      const normalStatus = normalStock <= 0 ? "sold-out" : (totalAllocated < totalRequested ? "partial" : "ready");
-      const damagedStatus = damagedStock <= 0 ? "sold-out" : (totalAllocated < totalRequested ? "partial" : "ready");
-
-      const normalRow = buildRow(request, normal[0], normalPlanned, normalStock, normalStatus);
-      normalRow.selected = normalPlanned > 0;
-      const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
-      damagedRow.selected = damagedPlanned > 0;
-      return [normalRow, damagedPlanned > 0 ? damagedRow : asOption(damagedRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
-    }
+    const [first, second] =
+      preference === "prefer-damaged" ? [damaged[0], normal[0]] : [normal[0], damaged[0]];
+    const firstStock = numbersForProduct(first).stock;
+    const secondStock = numbersForProduct(second).stock;
+    const firstPlanned = Math.min(request.requestedQuantity, firstStock);
+    const secondPlanned = Math.min(request.requestedQuantity - firstPlanned, secondStock);
+    const short = firstPlanned + secondPlanned < request.requestedQuantity;
+    const status = (stock) => (stock <= 0 ? "sold-out" : short ? "partial" : "ready");
+    const firstRow = buildRow(request, first, firstPlanned, firstStock, status(firstStock));
+    const secondRow = buildRow(request, second, secondPlanned, secondStock, status(secondStock));
+    // A fallback the preferred condition fully covered adds nothing; show it
+    // like any other zero-quantity option.
+    return [firstRow, secondPlanned > 0 ? secondRow : asOption(secondRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
   }
 
   return [makeMissingRow(request)];
@@ -732,12 +677,7 @@ export async function lookupProducts(requests, options = {}) {
   const candidatesById = new Map();
   const failuresById = new Map();
   const queries = [];
-  const fallbackIds = [];
-  const groups = groupIdsByPrefix(validRequests);
-  const grouped = new Set([...groups.values()].flat());
-  for (const request of validRequests) {
-    if (!grouped.has(request)) fallbackIds.push(request);
-  }
+  const { groups, fallbackIds } = buildLookupPlan(validRequests);
 
   let queryNumber = 0;
   const runQuery = async (type, query, queryIds, progress) => {
@@ -746,7 +686,7 @@ export async function lookupProducts(requests, options = {}) {
     notifyProgress(options, { type, query, ...progress });
     try {
       const page = await fetchSearchPage(query, options);
-      const parsed = parserReport(page.html, { ...options, expectedIds: queryIds });
+      const parsed = parseSearchResults(page.html);
       assertStructure(parsed, query, queryIds);
       mergeCandidates(candidatesById, matchingProducts(parsed.products, expectedIds));
       queries.push({

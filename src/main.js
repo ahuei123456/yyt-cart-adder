@@ -1,6 +1,6 @@
 import { parseInput } from "./core/input.js";
 import { lookupProducts } from "./core/lookup.js";
-import { addCartItems, DEFAULT_CART_DELAY_MS } from "./core/cart.js";
+import { addCartItems } from "./core/cart.js";
 import { mountApp } from "./ui/app.js";
 
 function uiRow(row) {
@@ -24,7 +24,6 @@ mountApp({
   async resolve(requests, options = {}) {
     const resolved = await lookupProducts(requests, {
       signal: options.signal,
-      delayMs: 250,
       conditionPreference: options.conditionPreference,
       onProgress: options.onProgress,
     });
@@ -34,7 +33,6 @@ mountApp({
     return addCartItems(rows, {
       cancelSignal: options.cancelSignal,
       onProgress: options.onProgress,
-      delayMs: DEFAULT_CART_DELAY_MS,
     });
   },
 });

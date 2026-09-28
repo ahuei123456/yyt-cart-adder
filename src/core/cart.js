@@ -50,7 +50,7 @@ function defaultFetch() {
 }
 
 function getFetchImplementation(options = {}) {
-  return options.fetchImpl ?? options.fetch ?? options.fetchFn ?? defaultFetch();
+  return options.fetch ?? defaultFetch();
 }
 
 function cleanToken(value) {
@@ -92,65 +92,15 @@ export function extractCsrfToken(documentRef = defaultDocument()) {
   return cleanToken(value);
 }
 
-function parseDocumentHtml(html, options = {}) {
-  if (typeof options.parseHtml === "function") {
-    return options.parseHtml(html);
-  }
-
-  const Parser = options.DOMParserImpl ?? options.DOMParser ??
-    (typeof DOMParser === "undefined" ? null : DOMParser);
-  if (Parser) {
-    return new Parser().parseFromString(html, "text/html");
-  }
-
-  // DOMParser is available in every supported browser.  This conservative
-  // fallback only exists for non-browser test environments; it does not
-  // execute or inject the fetched HTML.
-  return null;
-}
-
 /**
- * Extract a CSRF token from inert HTML returned by `/top/ws`.
- *
- * `DOMParser` is preferred in a browser.  A narrow meta-tag expression is
- * retained for environments without DOMParser (for example node:test).
+ * Extract a CSRF token from inert HTML returned by `/top/ws`.  DOMParser
+ * never runs the fetched page's scripts.
  */
-export function extractCsrfTokenFromHtml(html, options = {}) {
-  if (typeof html !== "string") {
+export function extractCsrfTokenFromHtml(html) {
+  if (typeof html !== "string" || typeof DOMParser === "undefined") {
     return null;
   }
-
-  let parsed = null;
-  try {
-    parsed = parseDocumentHtml(html, options);
-  } catch {
-    // A test double or a browser parser implementation can fail on malformed
-    // input.  The narrow meta-tag fallback below is still safe to inspect.
-    parsed = null;
-  }
-  const fromDocument = extractCsrfToken(parsed);
-  if (fromDocument) {
-    return fromDocument;
-  }
-
-  // Attribute order and quote style vary between HTML serializers.  Do not
-  // parse arbitrary scripts or retain the fetched page; only inspect meta
-  // tags whose name is csrf-token.
-  const metaTagPattern = /<meta\b[^>]*>/gi;
-  const tags = html.match(metaTagPattern) ?? [];
-  for (const tag of tags) {
-    const nameMatch = /\bname\s*=\s*(["'])csrf-token\1/i.exec(tag);
-    if (!nameMatch) {
-      continue;
-    }
-    const contentMatch = /\bcontent\s*=\s*(?:(["'])(.*?)\1|([^\s>]+))/i.exec(tag);
-    const rawToken = contentMatch?.[2] ?? contentMatch?.[3] ?? null;
-    const token = cleanToken(String(rawToken ?? "").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'"));
-    if (token) {
-      return token;
-    }
-  }
-  return null;
+  return extractCsrfToken(new DOMParser().parseFromString(html, "text/html"));
 }
 
 /**
@@ -158,8 +108,7 @@ export function extractCsrfTokenFromHtml(html, options = {}) {
  * `/top/ws` when the current document does not expose one.
  */
 export async function getCsrfToken(options = {}) {
-  options = options ?? {};
-  const documentRef = options.documentRef ?? options.document ?? defaultDocument();
+  const documentRef = options.documentRef ?? defaultDocument();
   const fromCurrentPage = extractCsrfToken(documentRef);
   if (fromCurrentPage) {
     return fromCurrentPage;
@@ -213,7 +162,7 @@ export async function getCsrfToken(options = {}) {
     );
   }
 
-  const token = extractCsrfTokenFromHtml(String(html), options);
+  const token = extractCsrfTokenFromHtml(String(html));
   if (!token) {
     throw new CartError(
       CART_ERROR_CODES.CSRF_MISSING,
@@ -319,6 +268,7 @@ function responseMessage(parsed, fallback) {
 function sanitizeReportMessage(value) {
   return String(value)
     .replace(/<[^>]*>/g, " ")
+    // eslint-disable-next-line no-control-regex -- strips control characters on purpose
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/(?:x-)?csrf[-_\s]?token\s*[:=]\s*[^\s,;]+/gi, "[redacted]")
     .replace(/(?:access|refresh)?token\s*[:=]\s*[^\s,;]+/gi, "[redacted]")
@@ -485,15 +435,7 @@ function validateProduct(product) {
 
 function availableQuantity(product) {
   const values = [];
-  for (const field of [
-    "stock",
-    "availableStock",
-    "cart_active",
-    "cartActive",
-    "limit",
-    "cart_limit",
-    "cartLimit",
-  ]) {
+  for (const field of ["stock", "limit", "cartActive", "cartLimit"]) {
     if (!(field in product) || product[field] == null || product[field] === "") {
       continue;
     }
@@ -533,19 +475,10 @@ function timestampValue(now) {
 /**
  * Build the exact form-encoded POST contract used by YYT.
  */
-export function buildCartRequest(product, plannedQuantity, csrfToken, options = {}) {
-  let config = typeof options === "function" ? { now: options } : options ?? {};
-  let tokenValue = csrfToken;
-  // Also accept `{ csrfToken, now }` as the third argument.  The explicit
-  // token argument remains the primary API, while this form is convenient for
-  // small callers and keeps the request builder easy to use in tests.
-  if (csrfToken && typeof csrfToken === "object") {
-    config = { ...csrfToken, ...config };
-    tokenValue = config.csrfToken ?? config.token;
-  }
+export function buildCartRequest(product, plannedQuantity, csrfToken, config = {}) {
   validateProduct(product);
   const quantity = prepareQuantity(product, plannedQuantity);
-  const token = cleanToken(tokenValue);
+  const token = cleanToken(csrfToken);
   if (!token) {
     throw new CartError(
       CART_ERROR_CODES.CSRF_MISSING,
@@ -607,43 +540,25 @@ function localValidationResult(item, error) {
  * as `unknown`; this function never retries a cart mutation.
  */
 export async function addCartItem(productOrItem, plannedQuantity, options = {}) {
-  let itemOptions = options ?? {};
-  let quantityValue = plannedQuantity;
-  // Support the row-oriented form used by the UI (`row, csrfToken, options`)
-  // as well as the lower-level (`product, plannedQuantity, options`) form.
-  // A numeric second argument is always interpreted as the planned quantity;
-  // a non-numeric string is a CSRF token.
-  if (plannedQuantity && typeof plannedQuantity === "object") {
-    itemOptions = { ...plannedQuantity, ...options };
-    quantityValue = itemOptions.plannedQuantity ?? itemOptions.quantity;
-  } else if (
-    typeof plannedQuantity === "string" &&
-    !/^\d+$/u.test(plannedQuantity.trim())
-  ) {
-    itemOptions = { csrfToken: plannedQuantity, ...options };
-    quantityValue = productOrItem?.plannedQuantity ?? productOrItem?.requestedQuantity ?? productOrItem?.product?.plannedQuantity ?? productOrItem?.product?.requestedQuantity;
-  }
-
   const item = productOrItem?.product ? productOrItem : { product: productOrItem };
   const product = item.product ?? {};
-  const signal = itemOptions.signal;
+  const signal = options.signal;
   if (signal?.aborted) {
     return skippedResult(item, CART_ERROR_CODES.CANCELLED, "Cancelled before the cart request was sent.");
   }
 
   let request;
   try {
-    const csrfToken = itemOptions.csrfToken ?? itemOptions.token;
-    request = buildCartRequest(product, quantityValue, csrfToken, {
-      now: itemOptions.now,
-      url: itemOptions.url,
+    request = buildCartRequest(product, plannedQuantity, options.csrfToken, {
+      now: options.now,
+      url: options.url,
       signal,
     });
   } catch (error) {
     return localValidationResult(item, error);
   }
 
-  const fetchImpl = getFetchImplementation(itemOptions);
+  const fetchImpl = getFetchImplementation(options);
   if (typeof fetchImpl !== "function") {
     return unknownResult(item, request.quantity);
   }
@@ -662,37 +577,11 @@ export async function addCartItem(productOrItem, plannedQuantity, options = {}) 
 }
 
 function isCancelled(options) {
-  if (options.signal?.aborted || options.cancelSignal?.aborted) {
-    return true;
-  }
-  if (typeof options.isCancelled === "function") {
-    try {
-      return Boolean(options.isCancelled());
-    } catch {
-      return false;
-    }
-  }
-  if (typeof options.cancelled === "function") {
-    try {
-      return Boolean(options.cancelled());
-    } catch {
-      return false;
-    }
-  }
-  return Boolean(options.cancelled);
+  return Boolean(options.signal?.aborted || options.cancelSignal?.aborted);
 }
 
 function skippedAfterStop(item, code, message) {
   return skippedResult(item, code ?? CART_ERROR_CODES.CART_REJECTED, message);
-}
-
-function itemProduct(item) {
-  return item?.product ?? item;
-}
-
-function itemQuantity(item) {
-  const product = itemProduct(item);
-  return item?.plannedQuantity ?? product?.plannedQuantity ?? item?.requestedQuantity ?? product?.requestedQuantity;
 }
 
 function notifyProgress(callback, value) {
@@ -740,7 +629,6 @@ function waitUnlessCancelled(milliseconds, cancelSignal) {
  * outcome unknown.
  */
 export async function addCartItems(items, options = {}) {
-  options = options ?? {};
   const list = Array.from(items ?? []);
   const results = [];
   if (list.length === 0) {
@@ -772,7 +660,7 @@ export async function addCartItems(items, options = {}) {
     };
   }
 
-  let csrfToken = cleanToken(options.csrfToken ?? options.token);
+  let csrfToken = cleanToken(options.csrfToken);
   if (!csrfToken) {
     try {
       csrfToken = await getCsrfToken(options);
@@ -795,7 +683,7 @@ export async function addCartItems(items, options = {}) {
   }
 
   const delayMs = options.delayMs ?? DEFAULT_CART_DELAY_MS;
-  const sleep = options.sleep ?? options.delay ??
+  const sleep = options.sleep ??
     ((milliseconds) => waitUnlessCancelled(milliseconds, options.cancelSignal));
   let stopped = false;
   let cancelled = false;
@@ -816,8 +704,7 @@ export async function addCartItems(items, options = {}) {
       break;
     }
 
-    const quantity = itemQuantity(item);
-    const result = await addCartItem(item, quantity, {
+    const result = await addCartItem(item, item?.plannedQuantity, {
       ...options,
       csrfToken,
     });

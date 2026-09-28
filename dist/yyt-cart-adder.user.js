@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YYT Weiss Schwarz Cart Adder
 // @namespace    local.yyt-cart-adder
-// @version      0.2.0
+// @version      0.3.0
 // @description  Resolve Weiss Schwarz card IDs and add reviewed quantities to a YYT cart.
 // @homepageURL  https://github.com/ahuei123456/yyt-cart-adder
 // @updateURL    https://raw.githubusercontent.com/ahuei123456/yyt-cart-adder/master/dist/yyt-cart-adder.user.js
@@ -59,22 +59,6 @@
     /検索結果(?:は)?[^\d]{0,10}0\s*件/i,
     /(?:検索|search)[^\d]{0,20}0\s*(?:件|results?)/i
   ];
-  var VOID_TAGS = /* @__PURE__ */ new Set([
-    "area",
-    "base",
-    "br",
-    "col",
-    "embed",
-    "hr",
-    "img",
-    "input",
-    "link",
-    "meta",
-    "param",
-    "source",
-    "track",
-    "wbr"
-  ]);
   function normalizePrintedId(value) {
     return String(value ?? "").trim().toLocaleLowerCase("en-US");
   }
@@ -87,33 +71,14 @@
     if (!match) return null;
     return match[0].replace(/[.,;:!?\])}]+$/u, "") || null;
   }
-  function decodeHtmlEntities(value) {
-    return String(value ?? "").replace(/&nbsp;/gi, "\xA0").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&#x([0-9a-f]+);/gi, (_match, hex) => {
-      const codePoint = Number.parseInt(hex, 16);
-      return Number.isSafeInteger(codePoint) && codePoint <= 1114111 ? String.fromCodePoint(codePoint) : _match;
-    }).replace(/&#(\d+);/g, (_match, digits) => {
-      const codePoint = Number.parseInt(digits, 10);
-      return Number.isSafeInteger(codePoint) && codePoint <= 1114111 ? String.fromCodePoint(codePoint) : _match;
-    });
-  }
   function cleanText(value) {
-    return decodeHtmlEntities(String(value ?? "")).replace(/[\u00a0\u2007\u202f]/g, " ").replace(/\s+/g, " ").trim();
-  }
-  function classNames(element) {
-    const value = element?.getAttribute?.("class") ?? (typeof element?.className === "string" ? element.className : "");
-    return String(value).split(/\s+/u).map((name) => name.trim()).filter(Boolean);
+    return String(value ?? "").replace(/[\u00a0\u2007\u202f]/g, " ").replace(/\s+/g, " ").trim();
   }
   function hasClass(element, className) {
-    if (!element) return false;
-    if (element.classList?.contains?.(className)) return true;
-    return classNames(element).includes(className);
+    return element?.classList?.contains(className) ?? false;
   }
   function getAttribute(element, name) {
-    if (!element) return null;
-    const value = element.getAttribute?.(name);
-    if (value != null) return String(value);
-    const property = element[name];
-    return property == null ? null : String(property);
+    return element?.getAttribute(name) ?? null;
   }
   function nodeText(element) {
     if (!element) return "";
@@ -215,7 +180,7 @@
       field
     };
   }
-  function parseProductElementDetailed(element, sectionRarity = null) {
+  function parseProductElement(element, sectionRarity = null) {
     if (!element) return { product: null, error: requiredFieldError("card-product") };
     const gid = readField(element, ".cart_gid");
     const ver = readField(element, ".cart_ver");
@@ -285,138 +250,6 @@
     const text = cleanText(String(html ?? ""));
     return EMPTY_RESULT_PATTERNS.some((pattern) => pattern.test(text));
   }
-  function getBrowserDocument(html, options) {
-    if (options?.document?.querySelectorAll) return options.document;
-    const parserConstructor = options?.DOMParser ?? (typeof globalThis !== "undefined" ? globalThis.DOMParser : void 0);
-    if (typeof parserConstructor !== "function") return null;
-    const parser = new parserConstructor();
-    return parser.parseFromString(String(html ?? ""), "text/html");
-  }
-  function parseAttributes(source) {
-    const attributes = /* @__PURE__ */ Object.create(null);
-    const attributePattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/gu;
-    let match;
-    while (match = attributePattern.exec(source)) {
-      const name = match[1].toLocaleLowerCase("en-US");
-      attributes[name] = decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? "");
-    }
-    return attributes;
-  }
-  function matchesAttributeSelector(element, selector) {
-    const match = selector.match(/^\[([\w:-]+)(?:\s*([*^$|~]?=)\s*["']?([^\]"']*)["']?)?\]$/u);
-    if (!match) return false;
-    const attribute = getAttribute(element, match[1]);
-    if (attribute == null) return false;
-    if (!match[2]) return true;
-    const expected = match[3] ?? "";
-    switch (match[2]) {
-      case "*=":
-        return attribute.includes(expected);
-      case "^=":
-        return attribute.startsWith(expected);
-      case "$=":
-        return attribute.endsWith(expected);
-      case "~=":
-        return attribute.split(/\s+/u).includes(expected);
-      case "|=":
-        return attribute === expected || attribute.startsWith(`${expected}-`);
-      case "=":
-        return attribute === expected;
-      default:
-        return false;
-    }
-  }
-  function matchesSimpleSelector(element, selector) {
-    if (!element || !selector) return false;
-    const trimmed = selector.trim();
-    if (!trimmed) return false;
-    const attributes = [...trimmed.matchAll(/\[[^\]]+\]/gu)];
-    for (const attribute of attributes) {
-      if (!matchesAttributeSelector(element, attribute[0])) return false;
-    }
-    const withoutAttributes = trimmed.replace(/\[[^\]]+\]/gu, "");
-    const tagMatch = withoutAttributes.match(/^([A-Za-z][\w:-]*)/u);
-    if (tagMatch && String(element.tagName ?? element.tag ?? "").toLocaleLowerCase("en-US") !== tagMatch[1].toLocaleLowerCase("en-US")) {
-      return false;
-    }
-    for (const classMatch of withoutAttributes.matchAll(/\.([\w-]+)/gu)) {
-      if (!hasClass(element, classMatch[1])) return false;
-    }
-    return true;
-  }
-  var HtmlNode = class {
-    constructor(tag, attributes = /* @__PURE__ */ Object.create(null), parent = null) {
-      this.tag = tag;
-      this.tagName = tag === "#root" ? "" : tag.toUpperCase();
-      this.attributes = attributes;
-      this.parent = parent;
-      this.children = [];
-      this.text = "";
-    }
-    getAttribute(name) {
-      const value = this.attributes[String(name).toLocaleLowerCase("en-US")];
-      return value == null ? null : value;
-    }
-    get textContent() {
-      return this.text + this.children.map((child) => child.textContent).join("");
-    }
-    querySelectorAll(selector) {
-      const selectors = String(selector).split(",").map((item) => item.trim()).filter(Boolean);
-      const matches = [];
-      const visit = (node) => {
-        for (const child of node.children) {
-          if (child.tag !== "#text" && selectors.some((item) => matchesSimpleSelector(child, item))) {
-            matches.push(child);
-          }
-          visit(child);
-        }
-      };
-      visit(this);
-      return matches;
-    }
-    querySelector(selector) {
-      return this.querySelectorAll(selector)[0] ?? null;
-    }
-  };
-  function parseFallbackHtml(html) {
-    const root = new HtmlNode("#root");
-    const stack = [root];
-    const tokenPattern = /<!--[\s\S]*?-->|<![^>]*>|<\/?[^>]+>/gu;
-    let cursor = 0;
-    let token;
-    const appendText = (value) => {
-      if (!value) return;
-      const node = new HtmlNode("#text", /* @__PURE__ */ Object.create(null), stack[stack.length - 1]);
-      node.text = decodeHtmlEntities(value);
-      stack[stack.length - 1].children.push(node);
-    };
-    while (token = tokenPattern.exec(String(html ?? ""))) {
-      appendText(String(html ?? "").slice(cursor, token.index));
-      cursor = tokenPattern.lastIndex;
-      const source = token[0];
-      if (/^<!--|^<!/u.test(source)) continue;
-      const closing = /^<\//u.test(source);
-      const content = source.replace(/^<\/?|>$/gu, "").trim();
-      const nameMatch = content.match(/^([^\s/>]+)/u);
-      if (!nameMatch) continue;
-      const name = nameMatch[1].toLocaleLowerCase("en-US");
-      if (closing) {
-        for (let index = stack.length - 1; index > 0; index -= 1) {
-          if (stack[index].tag === name) {
-            stack.length = index;
-            break;
-          }
-        }
-        continue;
-      }
-      const attributesSource = content.slice(nameMatch[0].length);
-      const node = new HtmlNode(name, parseAttributes(attributesSource), stack[stack.length - 1]);
-      stack[stack.length - 1].children.push(node);
-      if (!VOID_TAGS.has(name) && !/\/\s*$/u.test(content)) stack.push(node);
-    }
-    appendText(String(html ?? "").slice(cursor));
-    return root;
-  }
   function collectCardProducts(document2) {
     const cards = [];
     let sectionRarity = null;
@@ -426,14 +259,14 @@
     }
     return cards;
   }
-  function parseSearchResults(html, options = {}) {
+  function parseSearchResults(html) {
     const source = String(html ?? "");
-    const document2 = getBrowserDocument(source, options) ?? parseFallbackHtml(source);
+    const document2 = new DOMParser().parseFromString(source, "text/html");
     const cardElements = collectCardProducts(document2);
     const products = [];
     const rejected = [];
     for (const { element, sectionRarity } of cardElements) {
-      const parsed = parseProductElementDetailed(element, sectionRarity);
+      const parsed = parseProductElement(element, sectionRarity);
       if (parsed.product) products.push(parsed.product);
       else rejected.push(parsed.error);
     }
@@ -444,8 +277,7 @@
       rejected,
       cardProductCount: cardElements.length,
       structureError,
-      explicitEmpty,
-      document: document2
+      explicitEmpty
     };
   }
 
@@ -652,18 +484,14 @@
   function requestId(value) {
     if (typeof value === "string") return value.trim();
     if (!value || typeof value !== "object") return "";
-    const originals = Array.isArray(value.originalIds) ? value.originalIds : [];
-    return String(
-      value.originalId ?? value.printedId ?? value.id ?? originals[0] ?? value.normalizedId ?? ""
-    ).trim();
+    return String(value.originalId ?? value.originalIds?.[0] ?? "").trim();
   }
   function requestQuantity(value) {
-    if (typeof value === "string" || !value || typeof value !== "object") return 1;
-    return value.requestedQuantity ?? value.quantity ?? value.count ?? 1;
+    if (!value || typeof value !== "object") return 1;
+    return value.requestedQuantity ?? 1;
   }
   function sourceLines(value) {
-    if (!value || typeof value !== "object") return [];
-    const lines = value.sourceLines ?? value.lineNumbers ?? [];
+    const lines = value?.sourceLines;
     return Array.isArray(lines) ? lines.filter((line) => Number.isInteger(line)) : [];
   }
   function isValidQuantity(value) {
@@ -750,9 +578,13 @@
     }
     return groups;
   }
+  function buildLookupPlan(values) {
+    const groups = groupIdsByPrefix(values);
+    const groupedValues = new Set([...groups.values()].flat());
+    return { groups, fallbackIds: values.filter((value) => !groupedValues.has(value)) };
+  }
   function getFetch(options) {
-    const fetchFunction = options.fetch ?? options.fetchFn ?? options.fetchImpl;
-    if (typeof fetchFunction === "function") return fetchFunction;
+    if (typeof options.fetch === "function") return options.fetch;
     if (typeof globalThis !== "undefined" && typeof globalThis.fetch === "function") {
       return globalThis.fetch.bind(globalThis);
     }
@@ -763,17 +595,13 @@
   }
   function getOrigin(options) {
     if (options.origin) return String(options.origin);
-    if (options.baseUrl) return String(options.baseUrl);
     if (typeof globalThis !== "undefined" && globalThis.location?.origin) {
       return globalThis.location.origin;
     }
     return "https://yuyu-tei.jp";
   }
   function makeSearchUrl(query, options) {
-    if (typeof options.buildSearchUrl === "function") {
-      return options.buildSearchUrl(query);
-    }
-    const url = new URL(options.searchPath ?? "/sell/ws/s/search", getOrigin(options));
+    const url = new URL("/sell/ws/s/search", getOrigin(options));
     url.searchParams.set("search_word", query);
     return url.toString();
   }
@@ -880,20 +708,6 @@
       }
       return { query: String(query), url, status, html, response };
     }
-  }
-  function parserReport(html, options) {
-    const parser = options.parseSearchResults ?? options.parser;
-    const parsed = typeof parser === "function" ? parser(html, options) : parseSearchResults(html, options);
-    if (Array.isArray(parsed)) {
-      return {
-        products: parsed,
-        rejected: [],
-        cardProductCount: parsed.length,
-        structureError: false,
-        explicitEmpty: parsed.length === 0
-      };
-    }
-    return parsed;
   }
   function matchingProducts(products, normalizedIds) {
     const byId = /* @__PURE__ */ new Map();
@@ -1099,32 +913,16 @@
       return [makeSingleRow(request, damaged[0], request.requestedQuantity)];
     }
     if (normal.length === 1 && damaged.length === 1) {
-      const totalRequested = request.requestedQuantity;
-      const normalStock = numbersForProduct(normal[0]).stock;
-      const damagedStock = numbersForProduct(damaged[0]).stock;
-      if (preference === "prefer-damaged") {
-        const damagedPlanned = Math.min(totalRequested, damagedStock);
-        const normalPlanned = Math.min(Math.max(0, totalRequested - damagedPlanned), normalStock);
-        const totalAllocated = damagedPlanned + normalPlanned;
-        const damagedStatus = damagedStock <= 0 ? "sold-out" : totalAllocated < totalRequested ? "partial" : "ready";
-        const normalStatus = normalStock <= 0 ? "sold-out" : totalAllocated < totalRequested ? "partial" : "ready";
-        const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
-        damagedRow.selected = damagedPlanned > 0;
-        const normalRow = buildRow(request, normal[0], normalPlanned, normalStock, normalStatus);
-        normalRow.selected = normalPlanned > 0;
-        return [damagedRow, normalPlanned > 0 ? normalRow : asOption(normalRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
-      } else {
-        const normalPlanned = Math.min(totalRequested, normalStock);
-        const damagedPlanned = Math.min(Math.max(0, totalRequested - normalPlanned), damagedStock);
-        const totalAllocated = normalPlanned + damagedPlanned;
-        const normalStatus = normalStock <= 0 ? "sold-out" : totalAllocated < totalRequested ? "partial" : "ready";
-        const damagedStatus = damagedStock <= 0 ? "sold-out" : totalAllocated < totalRequested ? "partial" : "ready";
-        const normalRow = buildRow(request, normal[0], normalPlanned, normalStock, normalStatus);
-        normalRow.selected = normalPlanned > 0;
-        const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
-        damagedRow.selected = damagedPlanned > 0;
-        return [normalRow, damagedPlanned > 0 ? damagedRow : asOption(damagedRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
-      }
+      const [first, second] = preference === "prefer-damaged" ? [damaged[0], normal[0]] : [normal[0], damaged[0]];
+      const firstStock = numbersForProduct(first).stock;
+      const secondStock = numbersForProduct(second).stock;
+      const firstPlanned = Math.min(request.requestedQuantity, firstStock);
+      const secondPlanned = Math.min(request.requestedQuantity - firstPlanned, secondStock);
+      const short = firstPlanned + secondPlanned < request.requestedQuantity;
+      const status = (stock) => stock <= 0 ? "sold-out" : short ? "partial" : "ready";
+      const firstRow = buildRow(request, first, firstPlanned, firstStock, status(firstStock));
+      const secondRow = buildRow(request, second, secondPlanned, secondStock, status(secondStock));
+      return [firstRow, secondPlanned > 0 ? secondRow : asOption(secondRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
     }
     return [makeMissingRow(request)];
   }
@@ -1165,12 +963,7 @@
     const candidatesById = /* @__PURE__ */ new Map();
     const failuresById = /* @__PURE__ */ new Map();
     const queries = [];
-    const fallbackIds = [];
-    const groups = groupIdsByPrefix(validRequests);
-    const grouped = new Set([...groups.values()].flat());
-    for (const request of validRequests) {
-      if (!grouped.has(request)) fallbackIds.push(request);
-    }
+    const { groups, fallbackIds } = buildLookupPlan(validRequests);
     let queryNumber = 0;
     const runQuery = async (type, query, queryIds, progress) => {
       await delayBetweenQueries(options, queryNumber);
@@ -1178,7 +971,7 @@
       notifyProgress(options, { type, query, ...progress });
       try {
         const page = await fetchSearchPage(query, options);
-        const parsed = parserReport(page.html, { ...options, expectedIds: queryIds });
+        const parsed = parseSearchResults(page.html);
         assertStructure(parsed, query, queryIds);
         mergeCandidates(candidatesById, matchingProducts(parsed.products, expectedIds));
         queries.push({
@@ -1260,7 +1053,7 @@
     return globalThis.fetch.bind(globalThis);
   }
   function getFetchImplementation(options = {}) {
-    return options.fetchImpl ?? options.fetch ?? options.fetchFn ?? defaultFetch();
+    return options.fetch ?? defaultFetch();
   }
   function cleanToken(value) {
     if (typeof value !== "string") {
@@ -1291,49 +1084,14 @@
     }
     return cleanToken(value);
   }
-  function parseDocumentHtml(html, options = {}) {
-    if (typeof options.parseHtml === "function") {
-      return options.parseHtml(html);
-    }
-    const Parser = options.DOMParserImpl ?? options.DOMParser ?? (typeof DOMParser === "undefined" ? null : DOMParser);
-    if (Parser) {
-      return new Parser().parseFromString(html, "text/html");
-    }
-    return null;
-  }
-  function extractCsrfTokenFromHtml(html, options = {}) {
-    if (typeof html !== "string") {
+  function extractCsrfTokenFromHtml(html) {
+    if (typeof html !== "string" || typeof DOMParser === "undefined") {
       return null;
     }
-    let parsed = null;
-    try {
-      parsed = parseDocumentHtml(html, options);
-    } catch {
-      parsed = null;
-    }
-    const fromDocument = extractCsrfToken(parsed);
-    if (fromDocument) {
-      return fromDocument;
-    }
-    const metaTagPattern = /<meta\b[^>]*>/gi;
-    const tags = html.match(metaTagPattern) ?? [];
-    for (const tag of tags) {
-      const nameMatch = /\bname\s*=\s*(["'])csrf-token\1/i.exec(tag);
-      if (!nameMatch) {
-        continue;
-      }
-      const contentMatch = /\bcontent\s*=\s*(?:(["'])(.*?)\1|([^\s>]+))/i.exec(tag);
-      const rawToken = contentMatch?.[2] ?? contentMatch?.[3] ?? null;
-      const token = cleanToken(String(rawToken ?? "").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'"));
-      if (token) {
-        return token;
-      }
-    }
-    return null;
+    return extractCsrfToken(new DOMParser().parseFromString(html, "text/html"));
   }
   async function getCsrfToken(options = {}) {
-    options = options ?? {};
-    const documentRef = options.documentRef ?? options.document ?? defaultDocument();
+    const documentRef = options.documentRef ?? defaultDocument();
     const fromCurrentPage = extractCsrfToken(documentRef);
     if (fromCurrentPage) {
       return fromCurrentPage;
@@ -1381,7 +1139,7 @@
         { responseStatus: responseStatus2, cause: error }
       );
     }
-    const token = extractCsrfTokenFromHtml(String(html), options);
+    const token = extractCsrfTokenFromHtml(String(html));
     if (!token) {
       throw new CartError(
         CART_ERROR_CODES.CSRF_MISSING,
@@ -1604,15 +1362,7 @@
   }
   function availableQuantity(product) {
     const values = [];
-    for (const field of [
-      "stock",
-      "availableStock",
-      "cart_active",
-      "cartActive",
-      "limit",
-      "cart_limit",
-      "cartLimit"
-    ]) {
+    for (const field of ["stock", "limit", "cartActive", "cartLimit"]) {
       if (!(field in product) || product[field] == null || product[field] === "") {
         continue;
       }
@@ -1646,16 +1396,10 @@
     }
     return date.toISOString();
   }
-  function buildCartRequest(product, plannedQuantity, csrfToken, options = {}) {
-    let config = typeof options === "function" ? { now: options } : options ?? {};
-    let tokenValue = csrfToken;
-    if (csrfToken && typeof csrfToken === "object") {
-      config = { ...csrfToken, ...config };
-      tokenValue = config.csrfToken ?? config.token;
-    }
+  function buildCartRequest(product, plannedQuantity, csrfToken, config = {}) {
     validateProduct(product);
     const quantity = prepareQuantity(product, plannedQuantity);
-    const token = cleanToken(tokenValue);
+    const token = cleanToken(csrfToken);
     if (!token) {
       throw new CartError(
         CART_ERROR_CODES.CSRF_MISSING,
@@ -1708,33 +1452,23 @@
     return skippedResult(item, code, message);
   }
   async function addCartItem(productOrItem, plannedQuantity, options = {}) {
-    let itemOptions = options ?? {};
-    let quantityValue = plannedQuantity;
-    if (plannedQuantity && typeof plannedQuantity === "object") {
-      itemOptions = { ...plannedQuantity, ...options };
-      quantityValue = itemOptions.plannedQuantity ?? itemOptions.quantity;
-    } else if (typeof plannedQuantity === "string" && !/^\d+$/u.test(plannedQuantity.trim())) {
-      itemOptions = { csrfToken: plannedQuantity, ...options };
-      quantityValue = productOrItem?.plannedQuantity ?? productOrItem?.requestedQuantity ?? productOrItem?.product?.plannedQuantity ?? productOrItem?.product?.requestedQuantity;
-    }
     const item = productOrItem?.product ? productOrItem : { product: productOrItem };
     const product = item.product ?? {};
-    const signal = itemOptions.signal;
+    const signal = options.signal;
     if (signal?.aborted) {
       return skippedResult(item, CART_ERROR_CODES.CANCELLED, "Cancelled before the cart request was sent.");
     }
     let request;
     try {
-      const csrfToken = itemOptions.csrfToken ?? itemOptions.token;
-      request = buildCartRequest(product, quantityValue, csrfToken, {
-        now: itemOptions.now,
-        url: itemOptions.url,
+      request = buildCartRequest(product, plannedQuantity, options.csrfToken, {
+        now: options.now,
+        url: options.url,
         signal
       });
     } catch (error) {
       return localValidationResult(item, error);
     }
-    const fetchImpl = getFetchImplementation(itemOptions);
+    const fetchImpl = getFetchImplementation(options);
     if (typeof fetchImpl !== "function") {
       return unknownResult(item, request.quantity);
     }
@@ -1748,34 +1482,10 @@
     return parseCartResponse(response, item, request.quantity);
   }
   function isCancelled(options) {
-    if (options.signal?.aborted || options.cancelSignal?.aborted) {
-      return true;
-    }
-    if (typeof options.isCancelled === "function") {
-      try {
-        return Boolean(options.isCancelled());
-      } catch {
-        return false;
-      }
-    }
-    if (typeof options.cancelled === "function") {
-      try {
-        return Boolean(options.cancelled());
-      } catch {
-        return false;
-      }
-    }
-    return Boolean(options.cancelled);
+    return Boolean(options.signal?.aborted || options.cancelSignal?.aborted);
   }
   function skippedAfterStop(item, code, message) {
     return skippedResult(item, code ?? CART_ERROR_CODES.CART_REJECTED, message);
-  }
-  function itemProduct(item) {
-    return item?.product ?? item;
-  }
-  function itemQuantity(item) {
-    const product = itemProduct(item);
-    return item?.plannedQuantity ?? product?.plannedQuantity ?? item?.requestedQuantity ?? product?.requestedQuantity;
   }
   function notifyProgress2(callback, value) {
     if (typeof callback !== "function") {
@@ -1802,7 +1512,6 @@
     });
   }
   async function addCartItems(items, options = {}) {
-    options = options ?? {};
     const list = Array.from(items ?? []);
     const results = [];
     if (list.length === 0) {
@@ -1832,7 +1541,7 @@
         successfulCount: 0
       };
     }
-    let csrfToken = cleanToken(options.csrfToken ?? options.token);
+    let csrfToken = cleanToken(options.csrfToken);
     if (!csrfToken) {
       try {
         csrfToken = await getCsrfToken(options);
@@ -1854,7 +1563,7 @@
       }
     }
     const delayMs = options.delayMs ?? DEFAULT_CART_DELAY_MS;
-    const sleep2 = options.sleep ?? options.delay ?? ((milliseconds) => waitUnlessCancelled(milliseconds, options.cancelSignal));
+    const sleep2 = options.sleep ?? ((milliseconds) => waitUnlessCancelled(milliseconds, options.cancelSignal));
     let stopped = false;
     let cancelled = false;
     let stopCode = null;
@@ -1872,8 +1581,7 @@
         }
         break;
       }
-      const quantity = itemQuantity(item);
-      const result = await addCartItem(item, quantity, {
+      const result = await addCartItem(item, item?.plannedQuantity, {
         ...options,
         csrfToken
       });
@@ -2030,11 +1738,13 @@ a { color: #175cd3; }
     let previousFocus = null;
     let lookupController = null;
     let adding = false;
-    let requestCancel = null;
+    let showingResults = false;
     let resultsUnseen = false;
-    const setView = (...nodes) => body.replaceChildren(el("div", { className: "view" }, ...nodes));
+    const setView = (...nodes) => {
+      showingResults = false;
+      body.replaceChildren(el("div", { className: "view" }, ...nodes));
+    };
     const close = () => {
-      if (adding) requestCancel?.();
       lookupController?.abort();
       backdrop.hidden = true;
       previousFocus?.focus?.();
@@ -2042,7 +1752,8 @@ a { color: #175cd3; }
     const open = () => {
       previousFocus = document.activeElement;
       backdrop.hidden = false;
-      if (!adding && !resultsUnseen) showInput();
+      if (!body.firstChild || showingResults && !resultsUnseen) showInput();
+      else body.querySelector("textarea, button.primary")?.focus();
       resultsUnseen = false;
     };
     launcher.addEventListener("click", open);
@@ -2110,14 +1821,12 @@ a { color: #175cd3; }
     async function showResolving(parsed, source, conditionPreference = "prefer-normal") {
       lookupController = new AbortController();
       const message = el("p", { text: `Resolving ${parsed.requests.length} distinct card requests\u2026` });
-      const cancel = el("button", { type: "button", text: "Cancel", onClick: () => {
-        lookupController.abort();
-        showInput(source, conditionPreference);
-      } });
+      const cancel = el("button", { type: "button", text: "Cancel", onClick: () => lookupController.abort() });
       setView(el("h3", { text: "Resolving" }), message, el("progress", { className: "progress" }), el("div", { className: "actions" }, cancel));
+      const { signal } = lookupController;
       try {
         const rows = await resolve(parsed.requests, {
-          signal: lookupController.signal,
+          signal,
           conditionPreference,
           onProgress: ({ type, query, index, total }) => {
             message.textContent = type === "exact" ? `Searching individually for ${query} (${index + 1} of ${total})\u2026` : `Searching ${query} (${index + 1} of ${total})\u2026`;
@@ -2130,9 +1839,10 @@ a { color: #175cd3; }
           requestedQuantity: 0,
           plannedQuantity: 0
         }));
-        showReview([...rows, ...invalidRows], source, conditionPreference);
+        if (signal.aborted) showInput(source, conditionPreference);
+        else showReview([...rows, ...invalidRows], source, conditionPreference);
       } catch (error) {
-        if (error.name === "AbortError" || error.cause?.name === "AbortError") return;
+        if (signal.aborted) return showInput(source, conditionPreference);
         setView(
           el("h3", { text: "Lookup stopped" }),
           el("div", { className: "error", text: error.message || "Unable to resolve cards." }),
@@ -2199,14 +1909,14 @@ a { color: #175cd3; }
         const messages = [
           over.length ? `More copies than requested:
 ${over.join("\n")}` : "",
-          overStock.length ? `More than YYT has in stock:
+          overStock.length ? `More than YYT has in stock; lower a quantity to continue:
 ${overStock.join("\n")}` : ""
         ].filter(Boolean);
         overWarning.hidden = !messages.length;
         overWarning.textContent = messages.join("\n\n");
         totalText.textContent = `Estimated selected total: ${yen.format(total)}`;
         submit.textContent = `Add ${totalCards} card${totalCards === 1 ? "" : "s"} from ${productCount} product${productCount === 1 ? "" : "s"}`;
-        submit.disabled = !chosen.length;
+        submit.disabled = !chosen.length || overStock.length > 0;
       };
       for (const row of rows) {
         const stock = row.stock ?? row.availableStock ?? 0;
@@ -2289,7 +1999,7 @@ ${overStock.join("\n")}` : ""
       submit.addEventListener("click", async () => {
         if (adding) return;
         const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
-        if (chosen.length) await runBatch(rows, chosen, source, conditionPreference);
+        if (chosen.length) await runBatch(rows, chosen);
       });
       update();
       setView(
@@ -2302,19 +2012,25 @@ ${overStock.join("\n")}` : ""
       );
       submit.focus();
     }
-    async function runBatch(allRows, chosen, source, conditionPreference) {
+    async function runBatch(allRows, chosen) {
       adding = true;
+      const byProduct = /* @__PURE__ */ new Map();
+      for (const row of chosen) {
+        const key = productKey(row.product) ?? row;
+        const merged = byProduct.get(key);
+        if (merged) merged.plannedQuantity += row.plannedQuantity;
+        else byProduct.set(key, { ...row });
+      }
+      const items = [...byProduct.values()];
       const cancelController = new AbortController();
-      const describe = (row, index) => `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${chosen.length})\u2026`;
-      const current = el("p", { text: describe(chosen[0], 0) });
-      const progress = el("progress", { className: "progress", max: chosen.length, value: 0 });
-      const cancel = el("button", { className: "danger", type: "button", text: "Cancel before next item" });
-      requestCancel = () => {
+      const describe = (row, index) => `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${items.length})\u2026`;
+      const current = el("p", { text: describe(items[0], 0) });
+      const progress = el("progress", { className: "progress", max: items.length, value: 0 });
+      const cancel = el("button", { className: "danger", type: "button", text: "Cancel before next item", onClick: () => {
         cancelController.abort();
         cancel.disabled = true;
         current.textContent = "Cancellation requested; finishing the current request\u2026";
-      };
-      cancel.addEventListener("click", requestCancel);
+      } });
       setView(
         el("h3", { text: "Adding products one at a time" }),
         current,
@@ -2324,25 +2040,24 @@ ${overStock.join("\n")}` : ""
       );
       let results;
       try {
-        const batch = await addItems(chosen, {
+        const batch = await addItems(items, {
           cancelSignal: cancelController.signal,
           onProgress: ({ completedCount }) => {
             progress.value = completedCount;
-            if (!cancelController.signal.aborted && completedCount < chosen.length) {
-              current.textContent = describe(chosen[completedCount], completedCount);
+            if (!cancelController.signal.aborted && completedCount < items.length) {
+              current.textContent = describe(items[completedCount], completedCount);
             }
           }
         });
-        results = batch.results.map((result, index) => ({ row: chosen[index], ...result }));
+        results = batch.results.map((result, index) => ({ row: items[index], ...result }));
       } catch (error) {
         results = [{ outcome: "unknown", message: error.message || "The batch stopped unexpectedly; inspect the cart before retrying." }];
       }
       adding = false;
-      requestCancel = null;
       if (backdrop.hidden) resultsUnseen = true;
-      showResults(allRows, chosen, results, source, conditionPreference);
+      showResults(allRows, chosen, results);
     }
-    function showResults(allRows, chosen, results, source, conditionPreference) {
+    function showResults(allRows, chosen, results) {
       const selected = new Set(chosen);
       const skippedReview = allRows.filter((r) => !selected.has(r)).map((row) => ({ row, outcome: "skipped", message: statusReason(row) }));
       const combined = [...results, ...skippedReview];
@@ -2389,6 +2104,7 @@ ${overStock.join("\n")}` : ""
           el("button", { type: "button", text: "Close", onClick: close })
         )
       );
+      showingResults = true;
     }
     return { open, close, root };
   }
@@ -2414,7 +2130,6 @@ ${overStock.join("\n")}` : ""
     async resolve(requests, options = {}) {
       const resolved = await lookupProducts(requests, {
         signal: options.signal,
-        delayMs: 250,
         conditionPreference: options.conditionPreference,
         onProgress: options.onProgress
       });
@@ -2423,8 +2138,7 @@ ${overStock.join("\n")}` : ""
     addItems(rows, options = {}) {
       return addCartItems(rows, {
         cancelSignal: options.cancelSignal,
-        onProgress: options.onProgress,
-        delayMs: DEFAULT_CART_DELAY_MS
+        onProgress: options.onProgress
       });
     }
   });

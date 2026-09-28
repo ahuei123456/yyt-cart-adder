@@ -60,16 +60,18 @@ export function mountApp({ parse, resolve, addItems }) {
   let previousFocus = null;
   let lookupController = null;
   let adding = false;
-  // Set while a batch is running so closing the dialog cancels it the same
-  // way the Cancel button does.
-  let requestCancel = null;
+  let showingResults = false;
   // A batch that finishes while the dialog is closed leaves its results in
   // place for the next open instead of being replaced by a blank input view.
   let resultsUnseen = false;
 
-  const setView = (...nodes) => body.replaceChildren(el("div", { className: "view" }, ...nodes));
+  const setView = (...nodes) => {
+    showingResults = false;
+    body.replaceChildren(el("div", { className: "view" }, ...nodes));
+  };
+  // Closing only hides the dialog: a running batch carries on (its Cancel
+  // button is the one way to stop it) and the input or review is kept.
   const close = () => {
-    if (adding) requestCancel?.();
     lookupController?.abort();
     backdrop.hidden = true;
     previousFocus?.focus?.();
@@ -77,8 +79,8 @@ export function mountApp({ parse, resolve, addItems }) {
   const open = () => {
     previousFocus = document.activeElement;
     backdrop.hidden = false;
-    // While a batch is still running, reopening returns to its progress view.
-    if (!adding && !resultsUnseen) showInput();
+    if (!body.firstChild || (showingResults && !resultsUnseen)) showInput();
+    else body.querySelector("textarea, button.primary")?.focus();
     resultsUnseen = false;
   };
 
@@ -135,11 +137,12 @@ export function mountApp({ parse, resolve, addItems }) {
   async function showResolving(parsed, source, conditionPreference = "prefer-normal") {
     lookupController = new AbortController();
     const message = el("p", { text: `Resolving ${parsed.requests.length} distinct card requests…` });
-    const cancel = el("button", { type: "button", text: "Cancel", onClick: () => { lookupController.abort(); showInput(source, conditionPreference); } });
+    const cancel = el("button", { type: "button", text: "Cancel", onClick: () => lookupController.abort() });
     setView(el("h3", { text: "Resolving" }), message, el("progress", { className: "progress" }), el("div", { className: "actions" }, cancel));
+    const { signal } = lookupController;
     try {
       const rows = await resolve(parsed.requests, {
-        signal: lookupController.signal,
+        signal,
         conditionPreference,
         onProgress: ({ type, query, index, total }) => {
           message.textContent = type === "exact"
@@ -154,9 +157,11 @@ export function mountApp({ parse, resolve, addItems }) {
         requestedQuantity: 0,
         plannedQuantity: 0,
       }));
-      showReview([...rows, ...invalidRows], source, conditionPreference);
+      if (signal.aborted) showInput(source, conditionPreference);
+      else showReview([...rows, ...invalidRows], source, conditionPreference);
     } catch (error) {
-      if (error.name === "AbortError" || error.cause?.name === "AbortError") return;
+      // Cancel and closing the dialog both abort; go back to the input.
+      if (signal.aborted) return showInput(source, conditionPreference);
       setView(el("h3", { text: "Lookup stopped" }), el("div", { className: "error", text: error.message || "Unable to resolve cards." }),
         el("div", { className: "actions" }, el("button", { type: "button", text: "Back", onClick: () => showInput(source, conditionPreference) })));
     }
@@ -229,13 +234,13 @@ export function mountApp({ parse, resolve, addItems }) {
 
       const messages = [
         over.length ? `More copies than requested:\n${over.join("\n")}` : "",
-        overStock.length ? `More than YYT has in stock:\n${overStock.join("\n")}` : "",
+        overStock.length ? `More than YYT has in stock; lower a quantity to continue:\n${overStock.join("\n")}` : "",
       ].filter(Boolean);
       overWarning.hidden = !messages.length;
       overWarning.textContent = messages.join("\n\n");
       totalText.textContent = `Estimated selected total: ${yen.format(total)}`;
       submit.textContent = `Add ${totalCards} card${totalCards === 1 ? "" : "s"} from ${productCount} product${productCount === 1 ? "" : "s"}`;
-      submit.disabled = !chosen.length;
+      submit.disabled = !chosen.length || overStock.length > 0;
     };
 
     for (const row of rows) {
@@ -319,7 +324,7 @@ export function mountApp({ parse, resolve, addItems }) {
     submit.addEventListener("click", async () => {
       if (adding) return;
       const chosen = rows.filter((r) => r.selected && r.plannedQuantity > 0);
-      if (chosen.length) await runBatch(rows, chosen, source, conditionPreference);
+      if (chosen.length) await runBatch(rows, chosen);
     });
     update();
     setView(
@@ -333,47 +338,53 @@ export function mountApp({ parse, resolve, addItems }) {
     submit.focus();
   }
 
-  async function runBatch(allRows, chosen, source, conditionPreference) {
+  async function runBatch(allRows, chosen) {
     adding = true;
+    // Lines that resolve to the same product go to the cart as one request.
+    const byProduct = new Map();
+    for (const row of chosen) {
+      const key = productKey(row.product) ?? row;
+      const merged = byProduct.get(key);
+      if (merged) merged.plannedQuantity += row.plannedQuantity;
+      else byProduct.set(key, { ...row });
+    }
+    const items = [...byProduct.values()];
     const cancelController = new AbortController();
     const describe = (row, index) =>
-      `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${chosen.length})…`;
-    const current = el("p", { text: describe(chosen[0], 0) });
-    const progress = el("progress", { className: "progress", max: chosen.length, value: 0 });
-    const cancel = el("button", { className: "danger", type: "button", text: "Cancel before next item" });
-    requestCancel = () => {
+      `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${items.length})…`;
+    const current = el("p", { text: describe(items[0], 0) });
+    const progress = el("progress", { className: "progress", max: items.length, value: 0 });
+    const cancel = el("button", { className: "danger", type: "button", text: "Cancel before next item", onClick: () => {
       cancelController.abort();
       cancel.disabled = true;
       current.textContent = "Cancellation requested; finishing the current request…";
-    };
-    cancel.addEventListener("click", requestCancel);
+    } });
     setView(el("h3", { text: "Adding products one at a time" }), current, progress,
       el("p", { className: "hint", text: "Cancel affects only products not yet started. It cannot undo additions already completed." }), el("div", { className: "actions" }, cancel));
 
     let results;
     try {
-      const batch = await addItems(chosen, {
+      const batch = await addItems(items, {
         cancelSignal: cancelController.signal,
         onProgress: ({ completedCount }) => {
           progress.value = completedCount;
-          if (!cancelController.signal.aborted && completedCount < chosen.length) {
-            current.textContent = describe(chosen[completedCount], completedCount);
+          if (!cancelController.signal.aborted && completedCount < items.length) {
+            current.textContent = describe(items[completedCount], completedCount);
           }
         },
       });
-      results = batch.results.map((result, index) => ({ row: chosen[index], ...result }));
+      results = batch.results.map((result, index) => ({ row: items[index], ...result }));
     } catch (error) {
       // addItems reports every per-item outcome itself; a throw means the
       // batch runner failed and it is not known what reached the cart.
       results = [{ outcome: "unknown", message: error.message || "The batch stopped unexpectedly; inspect the cart before retrying." }];
     }
     adding = false;
-    requestCancel = null;
     if (backdrop.hidden) resultsUnseen = true;
-    showResults(allRows, chosen, results, source, conditionPreference);
+    showResults(allRows, chosen, results);
   }
 
-  function showResults(allRows, chosen, results, source, conditionPreference) {
+  function showResults(allRows, chosen, results) {
     const selected = new Set(chosen);
     const skippedReview = allRows.filter((r) => !selected.has(r)).map((row) => ({ row, outcome: "skipped", message: statusReason(row) }));
     const combined = [...results, ...skippedReview];
@@ -408,6 +419,7 @@ export function mountApp({ parse, resolve, addItems }) {
         el("button", { type: "button", text: "Open cart", className: "primary", onClick: () => { location.href = "/cart/sell"; } }), copy,
         el("button", { type: "button", text: "Close", onClick: close })),
     );
+    showingResults = true;
   }
 
   // `root` is returned for tests; the shadow root is closed to page scripts.

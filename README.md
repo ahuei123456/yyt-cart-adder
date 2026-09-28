@@ -45,25 +45,28 @@ Some sets list two products under one printed ID. On RZ/SE35, for example, `RZ/S
 - Every other rarity for that ID shows in the review table with quantity 0. Raise it there to add copies of that rarity instead of, or as well as, the first one.
 - To choose up front, add the rarity in uppercase: `RZ/SE35-01 2 S-RR` or `RZ/SE35-01,1,damaged,RR`. Only that rarity is then matched.
 
-Quantities must be integers from 1 through 99. Duplicate lines for the same card, condition and rarity are aggregated. Review every resolved line before adding it.
+Quantities must be integers from 1 through 99. Duplicate lines for the same card, condition and rarity are aggregated. Review every resolved line before adding it. Lines that end up on the same product are added in one request, and the review won't let their combined quantity exceed YYT's stock.
 
 ## Development
 
 ```text
 npm install
+npm run lint
 npm test
 npm run build
 ```
 
 Development dependencies are used only to build the single installable userscript and to run tests (the UI tests use happy-dom). The committed `dist` file does not require a local build.
 
-`dist` is committed because it is the install and update URL. Rebuild it with every source change; CI fails if it is out of date. To release, bump `version` in `package.json` and rebuild. The build writes that version into the userscript header, and Tampermonkey only offers an update when it increases.
+`dist` is committed because it is the install and update URL. Rebuild it with every source change; CI fails if it is out of date. To release, bump `version` in `package.json` and rebuild. The build writes that version into the userscript header, and Tampermonkey only offers an update when it increases; CI fails if `dist` changes without a version bump.
+
+A weekly workflow (`scripts/site-check.mjs`, also runnable by hand) resolves a known card and loads a CSRF token on the live site, so a change to YYT's pages is caught before it breaks a real order. [`docs/MVP_HANDOFF.md`](docs/MVP_HANDOFF.md) holds the original research into YYT's pages and cart endpoint.
 
 ## Safety notes
 
 - Search results and estimated totals reflect current lookup data; inventory is not reserved by placing it in the cart.
 - If one of YYT's searches fails or returns a page the script can't read, only the cards from that search are marked **Search failed** and skipped. Everything else can still be reviewed and added.
-- Additions occur sequentially. Cancel stops before the next product and does not undo prior successes. Closing the dialog while adding also cancels; reopening it shows the progress or the results.
+- Additions occur sequentially. Cancel stops before the next product and does not undo prior successes. Closing the dialog only hides it: a batch keeps running, and reopening shows its progress or results. Your card list and review are kept too.
 - A lost/aborted mutation response is reported as an unknown outcome and stops the batch. Inspect the cart before deciding whether to try that item again.
 - The tool ends at `/cart/sell`; checkout, login, payment, delivery, and order submission remain entirely manual.
 

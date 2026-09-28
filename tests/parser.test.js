@@ -5,9 +5,10 @@ import test from "node:test";
 import {
   extractPrintedId,
   normalizePrintedId,
-  parseSearchHtml,
   parseSearchResults,
 } from "../src/core/parser.js";
+
+const parseSearchHtml = (html) => parseSearchResults(html).products;
 
 function fixture(name) {
   return readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");

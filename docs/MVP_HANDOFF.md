@@ -1,5 +1,9 @@
 # YYT Weiss Schwarz Cart Adder — MVP Handoff
 
+> Historical: the original MVP plan, kept for its research into YYT's pages and
+> cart endpoint. The script has since moved past it (it handles damaged copies
+> and rarities, for example); the README describes current behavior.
+
 Status: implementation-ready plan  
 Research date: 2026-09-02 (Asia/Tokyo)  
 Target: Tampermonkey userscript for `https://yuyu-tei.jp`

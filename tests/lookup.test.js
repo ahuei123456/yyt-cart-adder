@@ -50,7 +50,7 @@ test("groups shared prefixes into one query and sends unusual IDs to fallback", 
   assert.equal(getSearchPrefix("unusual-id"), null);
 
   const plan = buildLookupPlan(["Kka/W102-005SEC", "unusual-id"]);
-  assert.deepEqual(plan.prefixQueries, ["Kka/W102"]);
+  assert.deepEqual([...plan.groups.keys()], ["Kka/W102"]);
   assert.deepEqual(plan.fallbackIds, ["unusual-id"]);
 });
 

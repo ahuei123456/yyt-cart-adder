@@ -1,11 +1,7 @@
 /**
  * Defensive parsing helpers for the HTML returned by YYT's Weiss Schwarz
- * sales search.
- *
- * The browser uses DOMParser.  A small inert HTML tree implementation is
- * included for Node tests so the core can be exercised without bringing a DOM
- * dependency into the userscript bundle.  The fallback is intentionally only
- * an HTML reader; it never evaluates script elements.
+ * sales search.  Pages are read with DOMParser, which never runs their
+ * scripts; Node tests supply happy-dom's.
  */
 
 import { ERROR_CODES } from "./errors.js";
@@ -24,23 +20,6 @@ const EMPTY_RESULT_PATTERNS = [
   /検索結果(?:は)?[^\d]{0,10}0\s*件/i,
   /(?:検索|search)[^\d]{0,20}0\s*(?:件|results?)/i,
 ];
-
-const VOID_TAGS = new Set([
-  "area",
-  "base",
-  "br",
-  "col",
-  "embed",
-  "hr",
-  "img",
-  "input",
-  "link",
-  "meta",
-  "param",
-  "source",
-  "track",
-  "wbr",
-]);
 
 /**
  * Normalize a printed card ID without removing punctuation or rarity
@@ -74,57 +53,19 @@ export function extractPrintedId(value) {
   return match[0].replace(/[.,;:!?\])}]+$/u, "") || null;
 }
 
-function decodeHtmlEntities(value) {
-  return String(value ?? "")
-    .replace(/&nbsp;/gi, "\u00a0")
-    .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&#x([0-9a-f]+);/gi, (_match, hex) => {
-      const codePoint = Number.parseInt(hex, 16);
-      return Number.isSafeInteger(codePoint) && codePoint <= 0x10ffff
-        ? String.fromCodePoint(codePoint)
-        : _match;
-    })
-    .replace(/&#(\d+);/g, (_match, digits) => {
-      const codePoint = Number.parseInt(digits, 10);
-      return Number.isSafeInteger(codePoint) && codePoint <= 0x10ffff
-        ? String.fromCodePoint(codePoint)
-        : _match;
-    });
-}
-
 function cleanText(value) {
-  return decodeHtmlEntities(String(value ?? ""))
+  return String(value ?? "")
     .replace(/[\u00a0\u2007\u202f]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function classNames(element) {
-  const value =
-    element?.getAttribute?.("class") ??
-    (typeof element?.className === "string" ? element.className : "");
-  return String(value)
-    .split(/\s+/u)
-    .map((name) => name.trim())
-    .filter(Boolean);
-}
-
 function hasClass(element, className) {
-  if (!element) return false;
-  if (element.classList?.contains?.(className)) return true;
-  return classNames(element).includes(className);
+  return element?.classList?.contains(className) ?? false;
 }
 
 function getAttribute(element, name) {
-  if (!element) return null;
-  const value = element.getAttribute?.(name);
-  if (value != null) return String(value);
-  const property = element[name];
-  return property == null ? null : String(property);
+  return element?.getAttribute(name) ?? null;
 }
 
 function nodeText(element) {
@@ -270,13 +211,10 @@ function requiredFieldError(field) {
 }
 
 /**
- * Parse one `.card-product` element.
- *
- * The public helper returns a product or null.  The internal detailed helper
- * additionally records why a candidate was rejected, which lets lookup
- * distinguish a normal empty result from a wholesale selector break.
+ * Parse one `.card-product` element, recording why a candidate was rejected
+ * so lookup can tell a normal empty result from a wholesale selector break.
  */
-function parseProductElementDetailed(element, sectionRarity = null) {
+function parseProductElement(element, sectionRarity = null) {
   if (!element) return { product: null, error: requiredFieldError("card-product") };
 
   const gid = readField(element, ".cart_gid");
@@ -352,175 +290,15 @@ function parseProductElementDetailed(element, sectionRarity = null) {
   return { product, error: null };
 }
 
-export function parseProductElement(element) {
-  return parseProductElementDetailed(element).product;
-}
-
 function looksLikeExplicitEmptyResult(html) {
   const text = cleanText(String(html ?? ""));
   return EMPTY_RESULT_PATTERNS.some((pattern) => pattern.test(text));
 }
 
-function getBrowserDocument(html, options) {
-  if (options?.document?.querySelectorAll) return options.document;
-
-  const parserConstructor =
-    options?.DOMParser ??
-    (typeof globalThis !== "undefined" ? globalThis.DOMParser : undefined);
-  if (typeof parserConstructor !== "function") return null;
-
-  const parser = new parserConstructor();
-  return parser.parseFromString(String(html ?? ""), "text/html");
-}
-
-function parseAttributes(source) {
-  const attributes = Object.create(null);
-  const attributePattern =
-    /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/gu;
-  let match;
-  while ((match = attributePattern.exec(source))) {
-    const name = match[1].toLocaleLowerCase("en-US");
-    attributes[name] = decodeHtmlEntities(match[2] ?? match[3] ?? match[4] ?? "");
-  }
-  return attributes;
-}
-
-function matchesAttributeSelector(element, selector) {
-  const match = selector.match(/^\[([\w:-]+)(?:\s*([*^$|~]?=)\s*["']?([^\]"']*)["']?)?\]$/u);
-  if (!match) return false;
-  const attribute = getAttribute(element, match[1]);
-  if (attribute == null) return false;
-  if (!match[2]) return true;
-  const expected = match[3] ?? "";
-  switch (match[2]) {
-    case "*=":
-      return attribute.includes(expected);
-    case "^=":
-      return attribute.startsWith(expected);
-    case "$=":
-      return attribute.endsWith(expected);
-    case "~=":
-      return attribute.split(/\s+/u).includes(expected);
-    case "|=":
-      return attribute === expected || attribute.startsWith(`${expected}-`);
-    case "=":
-      return attribute === expected;
-    default:
-      return false;
-  }
-}
-
-function matchesSimpleSelector(element, selector) {
-  if (!element || !selector) return false;
-  const trimmed = selector.trim();
-  if (!trimmed) return false;
-
-  const attributes = [...trimmed.matchAll(/\[[^\]]+\]/gu)];
-  for (const attribute of attributes) {
-    if (!matchesAttributeSelector(element, attribute[0])) return false;
-  }
-  const withoutAttributes = trimmed.replace(/\[[^\]]+\]/gu, "");
-  const tagMatch = withoutAttributes.match(/^([A-Za-z][\w:-]*)/u);
-  if (tagMatch && String(element.tagName ?? element.tag ?? "").toLocaleLowerCase("en-US") !== tagMatch[1].toLocaleLowerCase("en-US")) {
-    return false;
-  }
-  for (const classMatch of withoutAttributes.matchAll(/\.([\w-]+)/gu)) {
-    if (!hasClass(element, classMatch[1])) return false;
-  }
-  return true;
-}
-
-class HtmlNode {
-  constructor(tag, attributes = Object.create(null), parent = null) {
-    this.tag = tag;
-    this.tagName = tag === "#root" ? "" : tag.toUpperCase();
-    this.attributes = attributes;
-    this.parent = parent;
-    this.children = [];
-    this.text = "";
-  }
-
-  getAttribute(name) {
-    const value = this.attributes[String(name).toLocaleLowerCase("en-US")];
-    return value == null ? null : value;
-  }
-
-  get textContent() {
-    return this.text + this.children.map((child) => child.textContent).join("");
-  }
-
-  querySelectorAll(selector) {
-    const selectors = String(selector)
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-    const matches = [];
-    const visit = (node) => {
-      for (const child of node.children) {
-        if (child.tag !== "#text" && selectors.some((item) => matchesSimpleSelector(child, item))) {
-          matches.push(child);
-        }
-        visit(child);
-      }
-    };
-    visit(this);
-    return matches;
-  }
-
-  querySelector(selector) {
-    return this.querySelectorAll(selector)[0] ?? null;
-  }
-}
-
-function parseFallbackHtml(html) {
-  const root = new HtmlNode("#root");
-  const stack = [root];
-  const tokenPattern = /<!--[\s\S]*?-->|<![^>]*>|<\/?[^>]+>/gu;
-  let cursor = 0;
-  let token;
-
-  const appendText = (value) => {
-    if (!value) return;
-    const node = new HtmlNode("#text", Object.create(null), stack[stack.length - 1]);
-    node.text = decodeHtmlEntities(value);
-    stack[stack.length - 1].children.push(node);
-  };
-
-  while ((token = tokenPattern.exec(String(html ?? "")))) {
-    appendText(String(html ?? "").slice(cursor, token.index));
-    cursor = tokenPattern.lastIndex;
-    const source = token[0];
-    if (/^<!--|^<!/u.test(source)) continue;
-
-    const closing = /^<\//u.test(source);
-    const content = source.replace(/^<\/?|>$/gu, "").trim();
-    const nameMatch = content.match(/^([^\s/>]+)/u);
-    if (!nameMatch) continue;
-    const name = nameMatch[1].toLocaleLowerCase("en-US");
-
-    if (closing) {
-      for (let index = stack.length - 1; index > 0; index -= 1) {
-        if (stack[index].tag === name) {
-          stack.length = index;
-          break;
-        }
-      }
-      continue;
-    }
-
-    const attributesSource = content.slice(nameMatch[0].length);
-    const node = new HtmlNode(name, parseAttributes(attributesSource), stack[stack.length - 1]);
-    stack[stack.length - 1].children.push(node);
-    if (!VOID_TAGS.has(name) && !/\/\s*$/u.test(content)) stack.push(node);
-  }
-  appendText(String(html ?? "").slice(cursor));
-  return root;
-}
-
 /**
  * Return card elements in document order, each paired with the rarity of the
- * `… Card List` heading above it.  Both DOMParser and the fallback tree return
- * comma-selector matches in document order.
+ * `… Card List` heading above it; comma-selector matches come back in
+ * document order.
  */
 function collectCardProducts(document) {
   const cards = [];
@@ -540,15 +318,15 @@ function collectCardProducts(document) {
  * explicit no-results marker.  Callers should avoid presenting such a page as
  * a routine collection of missing cards.
  */
-export function parseSearchResults(html, options = {}) {
+export function parseSearchResults(html) {
   const source = String(html ?? "");
-  const document = getBrowserDocument(source, options) ?? parseFallbackHtml(source);
+  const document = new DOMParser().parseFromString(source, "text/html");
   const cardElements = collectCardProducts(document);
   const products = [];
   const rejected = [];
 
   for (const { element, sectionRarity } of cardElements) {
-    const parsed = parseProductElementDetailed(element, sectionRarity);
+    const parsed = parseProductElement(element, sectionRarity);
     if (parsed.product) products.push(parsed.product);
     else rejected.push(parsed.error);
   }
@@ -564,14 +342,6 @@ export function parseSearchResults(html, options = {}) {
     cardProductCount: cardElements.length,
     structureError,
     explicitEmpty,
-    document,
   };
 }
 
-/**
- * Convenient array-returning API for callers that only need valid products.
- * Diagnostics remain available through parseSearchResults.
- */
-export function parseSearchHtml(html, options = {}) {
-  return parseSearchResults(html, options).products;
-}

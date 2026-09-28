@@ -122,7 +122,7 @@ test("groups shared prefixes into one query and separates fallback IDs", () => {
   ].join("\n"));
 
   const plan = buildLookupPlan(requests);
-  assert.deepEqual(plan.prefixQueries, ["Kka/W102", "SMP/W99"]);
+  assert.deepEqual([...plan.groups.keys()], ["Kka/W102", "SMP/W99"]);
   assert.equal(plan.groups.get("Kka/W102").length, 2);
   assert.equal(plan.groups.get("SMP/W99").length, 1);
   assert.deepEqual(plan.fallbackIds.map((request) => request.normalizedId), ["unusualcard"]);
@@ -136,7 +136,7 @@ test("grouping preserves request and group order", () => {
     "Kka/W102-006SP",
   ].join("\n"));
   const plan = buildLookupPlan(requests);
-  assert.deepEqual(plan.prefixQueries, ["SMP/W99", "Kka/W102"]);
+  assert.deepEqual([...plan.groups.keys()], ["SMP/W99", "Kka/W102"]);
   assert.deepEqual(plan.groups.get("SMP/W99").map((request) => request.normalizedId), [
     "smp/w99-001r",
     "smp/w99-002r",
