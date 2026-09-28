@@ -236,3 +236,41 @@ test("Tab and Shift+Tab wrap focus inside the dialog", async (t) => {
   ui.pressKey("Tab", { shiftKey: true });
   assert.equal(ui.root.activeElement, last);
 });
+
+test('review quantities stay synchronized and respect the cart limit', async (t) => {
+  const { window } = withDom(t);
+  let sent;
+  const ui = mount(window, {
+    resolve: async () => [readyRow({ stock: 200 })],
+    addItems: async (items) => { sent = items; return { results: [] }; },
+  });
+  ui.open();
+  await ui.resolveInput();
+  const quantity = ui.root.querySelector('.qty-input');
+  for (const [typed, expected] of [['1.5', '0'], ['-1', '0'], ['', '0'], ['150', '99']]) {
+    quantity.value = typed;
+    quantity.dispatchEvent(new window.Event('input'));
+    assert.equal(quantity.value, expected);
+    assert.equal(ui.button('Add ').disabled, expected === '0');
+  }
+  ui.button('Add ').click();
+  await flush();
+  assert.equal(sent[0].plannedQuantity, 99);
+});
+
+test('merged review rows cannot exceed 99 copies even with enough stock', async (t) => {
+  const { window } = withDom(t);
+  const ui = mount(window, {
+    resolve: async () => [
+      readyRow({ stock: 200, plannedQuantity: 60 }),
+      readyRow({ stock: 200, plannedQuantity: 40, inputIndex: 1 }),
+    ],
+  });
+  ui.open();
+  await ui.resolveInput();
+  assert.equal(ui.button('Add ').disabled, true);
+  const quantity = ui.root.querySelectorAll('.qty-input')[1];
+  quantity.value = '39';
+  quantity.dispatchEvent(new window.Event('input'));
+  assert.equal(ui.button('Add ').disabled, false);
+});

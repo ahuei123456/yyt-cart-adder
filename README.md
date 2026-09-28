@@ -67,7 +67,8 @@ A weekly workflow (`scripts/site-check.mjs`, also runnable by hand) resolves a k
 - Search results and estimated totals reflect current lookup data; inventory is not reserved by placing it in the cart.
 - If one of YYT's searches fails or returns a page the script can't read, only the cards from that search are marked **Search failed** and skipped. Everything else can still be reviewed and added.
 - Additions occur sequentially. Cancel stops before the next product and does not undo prior successes. Closing the dialog only hides it: a batch keeps running, and reopening shows its progress or results. Your card list and review are kept too.
-- A lost/aborted mutation response is reported as an unknown outcome and stops the batch. Inspect the cart before deciding whether to try that item again.
+- Requests time out after 30 seconds, including response-body reads. Safe search requests may retry; cart additions never retry automatically.
+- A lost, timed-out, malformed success response or server error from a cart mutation is reported as an unknown outcome and stops the batch. Inspect the cart before deciding whether to try that item again.
 - The tool ends at `/cart/sell`; checkout, login, payment, delivery, and order submission remain entirely manual.
 
 ## Uninstall

@@ -151,21 +151,20 @@ test("handles damaged card addition with kizu 1", async () => {
   assert.equal(calls[0].init.body.get("kizu"), "1");
 });
 
-test("maps invalid JSON to a definite response failure", async () => {
+test("treats invalid success-response JSON as an unknown outcome", async () => {
   const { fetchImpl } = requestCalls([response(200, "not-json")]);
   const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetch: fetchImpl });
 
-  assert.equal(result.outcome, "failed");
-  assert.equal(result.code, CART_ERROR_CODES.CART_RESPONSE_INVALID);
+  assert.equal(result.outcome, "unknown");
+  assert.equal(result.code, CART_ERROR_CODES.CART_OUTCOME_UNKNOWN);
   assert.equal(result.stopBatch, true);
 });
 
-test("classifies auth, rate-limit, and server responses as batch-stopping", async () => {
+test("classifies auth and rate-limit responses as batch-stopping", async () => {
   for (const [status, code] of [
     [403, CART_ERROR_CODES.CART_AUTH],
     [419, CART_ERROR_CODES.CART_AUTH],
     [429, CART_ERROR_CODES.CART_RATE_LIMIT],
-    [503, CART_ERROR_CODES.CART_SERVER],
   ]) {
     const { fetchImpl } = requestCalls([response(status, '{"status":"ERROR"}', { ok: false })]);
     const result = await addCartItem(product(), 1, { csrfToken: "csrf", fetch: fetchImpl });
@@ -290,7 +289,8 @@ test("cancelSignal ends the delay between items and is never passed to fetch", a
 
   assert.ok(Date.now() - started < 5_000);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].init.signal, undefined);
+  assert.notEqual(calls[0].init.signal, controller.signal);
+  assert.equal(calls[0].init.signal.aborted, false, "batch cancellation must not abort the request signal");
   assert.deepEqual(result.results.map((item) => item.outcome), ["success", "skipped"]);
   assert.equal(result.results[1].code, CART_ERROR_CODES.CANCELLED);
 });
@@ -313,3 +313,51 @@ test("missing CSRF token prevents every cart mutation", async () => {
   assert.equal(result.results[0].code, CART_ERROR_CODES.CSRF_MISSING);
 });
 
+for (const [status, body] of [[200, '{}'], [200, 'null'], [200, '{"status":""}'], [200, '<html>error</html>'], [500, '{"status":"ERROR"}'], [503, 'unavailable']]) {
+  test('uncertain cart response stops the batch: ' + status + ' ' + body, async () => {
+    const { calls, fetchImpl } = requestCalls([response(status, body)]);
+    const result = await addCartItems([
+      { product: product(), plannedQuantity: 1 },
+      { product: product({ cid: '2' }), plannedQuantity: 1 },
+    ], { csrfToken: 'csrf', fetch: fetchImpl });
+    assert.equal(calls.length, 1);
+    assert.deepEqual(result.results.map((r) => r.outcome), ['unknown', 'skipped']);
+    assert.match(result.results[0].message, /inspect/);
+  });
+}
+
+for (const phase of ['headers', 'body']) {
+  test('cart timeout during ' + phase + ' stops without retrying', async () => {
+    let calls = 0;
+    let requestSignal;
+    const result = await addCartItems([
+      { product: product(), plannedQuantity: 1 },
+      { product: product({ cid: '2' }), plannedQuantity: 1 },
+    ], {
+      csrfToken: 'csrf', timeoutMs: 10,
+      fetch: async (_url, init) => {
+        calls++;
+        requestSignal = init.signal;
+        if (phase === 'headers') return new Promise(() => {});
+        return { status: 200, ok: true, text: () => new Promise(() => {}) };
+      },
+    });
+    assert.equal(calls, 1);
+    assert.equal(requestSignal.aborted, true);
+    assert.deepEqual(result.results.map((r) => r.outcome), ['unknown', 'skipped']);
+  });
+}
+
+test('CSRF body timeout prevents cart mutations', async () => {
+  const urls = [];
+  const result = await addCartItems([{ product: product(), plannedQuantity: 1 }], {
+    documentRef: { querySelector: () => null }, timeoutMs: 10,
+    fetch: async (url) => {
+      urls.push(url);
+      return { status: 200, ok: true, text: () => new Promise(() => {}) };
+    },
+  });
+  assert.deepEqual(urls, ['/top/ws']);
+  assert.equal(result.results[0].outcome, 'skipped');
+  assert.equal(result.stopCode, CART_ERROR_CODES.CSRF_MISSING);
+});

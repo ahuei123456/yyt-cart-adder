@@ -226,15 +226,15 @@ export function mountApp({ parse, resolve, addItems }) {
       const overStock = [];
       for (const group of byProduct.values()) {
         const adding = group.filter((r) => r.selected).reduce((n, r) => n + (r.plannedQuantity || 0), 0);
-        const stock = group[0].stock ?? group[0].availableStock ?? 0;
+        const stock = Math.min(99, ...group.map((r) => r.stock ?? r.availableStock ?? 0));
         const isOver = group.length > 1 && adding > stock;
         for (const r of group) if (isOver) rowElements.get(r)?.classList.add("over");
-        if (isOver) overStock.push(`${group[0].printedId} (${group[0].condition}): adding ${adding} across lines, ${stock} in stock`);
+        if (isOver) overStock.push(`${group[0].printedId} (${group[0].condition}): adding ${adding} across lines, maximum ${stock} allowed`);
       }
 
       const messages = [
         over.length ? `More copies than requested:\n${over.join("\n")}` : "",
-        overStock.length ? `More than YYT has in stock; lower a quantity to continue:\n${overStock.join("\n")}` : "",
+        overStock.length ? `More than YYT has in stock or the 99-copy limit; lower a quantity to continue:\n${overStock.join("\n")}` : "",
       ].filter(Boolean);
       overWarning.hidden = !messages.length;
       overWarning.textContent = messages.join("\n\n");
@@ -245,6 +245,7 @@ export function mountApp({ parse, resolve, addItems }) {
 
     for (const row of rows) {
       const stock = row.stock ?? row.availableStock ?? 0;
+      const quantityLimit = Math.min(stock, 99);
       const selectable = isRowSelectable(row);
       const checkbox = el("input", {
         type: "checkbox",
@@ -259,14 +260,15 @@ export function mountApp({ parse, resolve, addItems }) {
           type: "number",
           className: "qty-input",
           min: 0,
-          max: stock,
+          max: quantityLimit,
           value: String(row.plannedQuantity ?? 0),
           "aria-label": `Quantity for ${row.printedId || row.requestedId}`,
         });
         qtyInput.addEventListener("input", () => {
-          let val = parseInt(qtyInput.value, 10);
-          if (isNaN(val) || val < 0) val = 0;
-          if (val > stock) val = stock;
+          let val = Number(qtyInput.value);
+          if (!Number.isSafeInteger(val) || val < 0) val = 0;
+          if (val > quantityLimit) val = quantityLimit;
+          qtyInput.value = String(val);
           row.plannedQuantity = val;
           row.selected = val > 0;
           checkbox.checked = row.selected;
@@ -275,7 +277,7 @@ export function mountApp({ parse, resolve, addItems }) {
         checkbox.addEventListener("change", () => {
           row.selected = checkbox.checked;
           if (row.selected && row.plannedQuantity === 0) {
-            row.plannedQuantity = Math.min(row.requestedQuantity || 1, stock);
+            row.plannedQuantity = Math.min(row.requestedQuantity || 1, quantityLimit);
             qtyInput.value = String(row.plannedQuantity);
           } else if (!row.selected) {
             row.plannedQuantity = 0;

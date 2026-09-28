@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YYT Weiss Schwarz Cart Adder
 // @namespace    local.yyt-cart-adder
-// @version      0.3.0
+// @version      0.3.1
 // @description  Resolve Weiss Schwarz card IDs and add reviewed quantities to a YYT cart.
 // @homepageURL  https://github.com/ahuei123456/yyt-cart-adder
 // @updateURL    https://raw.githubusercontent.com/ahuei123456/yyt-cart-adder/master/dist/yyt-cart-adder.user.js
@@ -468,6 +468,33 @@
     };
   }
 
+  // src/core/request.js
+  var DEFAULT_REQUEST_TIMEOUT_MS = 3e4;
+  async function withRequestDeadline(run, options = {}) {
+    const controller = new AbortController();
+    const parent = options.signal;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    let timer;
+    const onAbort = () => controller.abort(parent.reason);
+    if (parent?.aborted) onAbort();
+    else parent?.addEventListener("abort", onAbort, { once: true });
+    let rejectAbort;
+    const aborted = new Promise((_, reject) => {
+      rejectAbort = reject;
+    });
+    const stop = () => rejectAbort(controller.signal.reason);
+    controller.signal.addEventListener("abort", stop, { once: true });
+    try {
+      if (controller.signal.aborted) throw controller.signal.reason;
+      timer = setTimeout(() => controller.abort(new DOMException("Request timed out", "TimeoutError")), timeoutMs);
+      return await Promise.race([run(controller.signal), aborted]);
+    } finally {
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", onAbort);
+      controller.signal.removeEventListener("abort", stop);
+    }
+  }
+
   // src/core/lookup.js
   var LOOKUP_ERROR_CODES = Object.freeze({
     NETWORK: ERROR_CODES.LOOKUP_NETWORK,
@@ -658,13 +685,17 @@
     let attempt = 0;
     while (true) {
       let response;
+      let html;
       try {
-        response = await fetchFunction(url, {
-          method: "GET",
-          credentials: "same-origin",
-          headers: { Accept: "text/html" },
-          ...options.signal ? { signal: options.signal } : {}
-        });
+        await withRequestDeadline(async (signal) => {
+          response = await fetchFunction(url, {
+            method: "GET",
+            credentials: "same-origin",
+            headers: { Accept: "text/html" },
+            signal
+          });
+          if (responseOk(response)) html = await response.text();
+        }, options);
       } catch (error) {
         if (!isAbortError(error) && attempt < maxRetries) {
           await sleep(retryBaseMs * 2 ** attempt, options);
@@ -690,21 +721,6 @@
           `YYT search returned HTTP ${status}`,
           { query: String(query), url, status }
         );
-      }
-      let html;
-      try {
-        html = await response.text();
-      } catch (error) {
-        if (attempt < maxRetries) {
-          await sleep(retryBaseMs * 2 ** attempt, options);
-          attempt += 1;
-          continue;
-        }
-        throw new LookupError(LOOKUP_ERROR_CODES.NETWORK, "YYT search response could not be read", {
-          cause: error,
-          query: String(query),
-          url
-        });
       }
       return { query: String(query), url, status, html, response };
     }
@@ -1091,6 +1107,14 @@
     return extractCsrfToken(new DOMParser().parseFromString(html, "text/html"));
   }
   async function getCsrfToken(options = {}) {
+    try {
+      return await withRequestDeadline((signal) => loadCsrfToken({ ...options, signal }), options);
+    } catch (error) {
+      if (error instanceof CartError) throw error;
+      throw new CartError(CART_ERROR_CODES.CSRF_MISSING, "The CSRF token could not be loaded. Nothing was added to the cart.", { cause: error });
+    }
+  }
+  async function loadCsrfToken(options) {
     const documentRef = options.documentRef ?? defaultDocument();
     const fromCurrentPage = extractCsrfToken(documentRef);
     if (fromCurrentPage) {
@@ -1278,6 +1302,7 @@
   }
   async function parseCartResponse(response, item = {}, attemptedQuantity = 0) {
     const responseStatus2 = numericResponseStatus(response);
+    if (responseStatus2 >= 500) return unknownResult(item, attemptedQuantity, responseStatus2);
     let text;
     try {
       text = await response.text();
@@ -1308,11 +1333,12 @@
     try {
       parsed = JSON.parse(String(text).replace(/^\uFEFF/u, ""));
     } catch {
-      const code = responseIsOk(response) ? CART_ERROR_CODES.CART_RESPONSE_INVALID : classifyHttpFailure(responseStatus2, null, responseIsOk(response)).code;
+      if (responseIsOk(response)) return unknownResult(item, attemptedQuantity, responseStatus2);
+      const code = classifyHttpFailure(responseStatus2, null, false).code;
       return {
         ...resultBase(item, attemptedQuantity),
         outcome: "failed",
-        message: responseIsOk(response) ? "YYT returned an invalid cart response." : "YYT rejected this cart item with an unreadable response.",
+        message: "YYT rejected this cart item with an unreadable response.",
         responseStatus: responseStatus2,
         code,
         errorCode: code,
@@ -1329,6 +1355,9 @@
         errorCode: null,
         stopBatch: false
       };
+    }
+    if (responseIsOk(response) && (!parsed || typeof parsed.status !== "string" || !parsed.status.trim())) {
+      return unknownResult(item, attemptedQuantity, responseStatus2);
     }
     const classification = classifyHttpFailure(responseStatus2, parsed, responseIsOk(response));
     return {
@@ -1472,14 +1501,15 @@
     if (typeof fetchImpl !== "function") {
       return unknownResult(item, request.quantity);
     }
-    let response;
     try {
       const { quantity: _quantity, ...requestInit } = request;
-      response = await fetchImpl(request.url, requestInit);
+      return await withRequestDeadline(async (requestSignal) => {
+        const response = await fetchImpl(request.url, { ...requestInit, signal: requestSignal });
+        return parseCartResponse(response, item, request.quantity);
+      }, options);
     } catch {
       return unknownResult(item, request.quantity);
     }
-    return parseCartResponse(response, item, request.quantity);
   }
   function isCancelled(options) {
     return Boolean(options.signal?.aborted || options.cancelSignal?.aborted);
@@ -1901,15 +1931,15 @@ a { color: #175cd3; }
         const overStock = [];
         for (const group of byProduct.values()) {
           const adding2 = group.filter((r) => r.selected).reduce((n, r) => n + (r.plannedQuantity || 0), 0);
-          const stock = group[0].stock ?? group[0].availableStock ?? 0;
+          const stock = Math.min(99, ...group.map((r) => r.stock ?? r.availableStock ?? 0));
           const isOver = group.length > 1 && adding2 > stock;
           for (const r of group) if (isOver) rowElements.get(r)?.classList.add("over");
-          if (isOver) overStock.push(`${group[0].printedId} (${group[0].condition}): adding ${adding2} across lines, ${stock} in stock`);
+          if (isOver) overStock.push(`${group[0].printedId} (${group[0].condition}): adding ${adding2} across lines, maximum ${stock} allowed`);
         }
         const messages = [
           over.length ? `More copies than requested:
 ${over.join("\n")}` : "",
-          overStock.length ? `More than YYT has in stock; lower a quantity to continue:
+          overStock.length ? `More than YYT has in stock or the 99-copy limit; lower a quantity to continue:
 ${overStock.join("\n")}` : ""
         ].filter(Boolean);
         overWarning.hidden = !messages.length;
@@ -1920,6 +1950,7 @@ ${overStock.join("\n")}` : ""
       };
       for (const row of rows) {
         const stock = row.stock ?? row.availableStock ?? 0;
+        const quantityLimit = Math.min(stock, 99);
         const selectable = isRowSelectable(row);
         const checkbox = el("input", {
           type: "checkbox",
@@ -1933,14 +1964,15 @@ ${overStock.join("\n")}` : ""
             type: "number",
             className: "qty-input",
             min: 0,
-            max: stock,
+            max: quantityLimit,
             value: String(row.plannedQuantity ?? 0),
             "aria-label": `Quantity for ${row.printedId || row.requestedId}`
           });
           qtyInput.addEventListener("input", () => {
-            let val = parseInt(qtyInput.value, 10);
-            if (isNaN(val) || val < 0) val = 0;
-            if (val > stock) val = stock;
+            let val = Number(qtyInput.value);
+            if (!Number.isSafeInteger(val) || val < 0) val = 0;
+            if (val > quantityLimit) val = quantityLimit;
+            qtyInput.value = String(val);
             row.plannedQuantity = val;
             row.selected = val > 0;
             checkbox.checked = row.selected;
@@ -1949,7 +1981,7 @@ ${overStock.join("\n")}` : ""
           checkbox.addEventListener("change", () => {
             row.selected = checkbox.checked;
             if (row.selected && row.plannedQuantity === 0) {
-              row.plannedQuantity = Math.min(row.requestedQuantity || 1, stock);
+              row.plannedQuantity = Math.min(row.requestedQuantity || 1, quantityLimit);
               qtyInput.value = String(row.plannedQuantity);
             } else if (!row.selected) {
               row.plannedQuantity = 0;

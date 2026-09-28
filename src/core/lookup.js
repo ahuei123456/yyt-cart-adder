@@ -4,6 +4,7 @@ import {
   parseSearchResults,
 } from "./parser.js";
 import { ERROR_CODES, YytError } from "./errors.js";
+import { withRequestDeadline } from "./request.js";
 
 export const LOOKUP_ERROR_CODES = Object.freeze({
   NETWORK: ERROR_CODES.LOOKUP_NETWORK,
@@ -269,13 +270,17 @@ export async function fetchSearchPage(query, options = {}) {
 
   while (true) {
     let response;
+    let html;
     try {
-      response = await fetchFunction(url, {
-        method: "GET",
-        credentials: "same-origin",
-        headers: { Accept: "text/html" },
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
+      await withRequestDeadline(async (signal) => {
+        response = await fetchFunction(url, {
+          method: "GET",
+          credentials: "same-origin",
+          headers: { Accept: "text/html" },
+          signal,
+        });
+        if (responseOk(response)) html = await response.text();
+      }, options);
     } catch (error) {
       if (!isAbortError(error) && attempt < maxRetries) {
         await sleep(retryBaseMs * 2 ** attempt, options);
@@ -302,22 +307,6 @@ export async function fetchSearchPage(query, options = {}) {
         `YYT search returned HTTP ${status}`,
         { query: String(query), url, status },
       );
-    }
-
-    let html;
-    try {
-      html = await response.text();
-    } catch (error) {
-      if (attempt < maxRetries) {
-        await sleep(retryBaseMs * 2 ** attempt, options);
-        attempt += 1;
-        continue;
-      }
-      throw new LookupError(LOOKUP_ERROR_CODES.NETWORK, "YYT search response could not be read", {
-        cause: error,
-        query: String(query),
-        url,
-      });
     }
 
     return { query: String(query), url, status, html, response };

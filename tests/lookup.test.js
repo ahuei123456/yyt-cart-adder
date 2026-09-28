@@ -421,3 +421,23 @@ test("an unused fallback condition is shown as an option", async () => {
     ],
   );
 });
+
+for (const phase of ['headers', 'body']) {
+  test('lookup timeout during ' + phase + ' retries within its limit', async () => {
+    let calls = 0;
+    const signals = [];
+    const result = await lookupProducts(['Kka/W102-005SEC'], {
+      timeoutMs: 10, maxRetries: 1, retryBaseMs: 0,
+      fetch: async (_url, init) => {
+        calls++;
+        signals.push(init.signal);
+        if (phase === 'headers') return new Promise(() => {});
+        return { status: 200, ok: true, text: () => new Promise(() => {}) };
+      },
+    });
+    assert.equal(calls, 2);
+    assert.ok(signals.every((signal) => signal.aborted));
+    assert.equal(result.rows[0].status, 'error');
+    assert.equal(result.rows[0].reason, 'LOOKUP_NETWORK');
+  });
+}

@@ -8,6 +8,7 @@
  */
 
 import { ERROR_CODES, YytError } from "./errors.js";
+import { withRequestDeadline } from "./request.js";
 
 export { ERROR_CODES };
 export const CART_ERROR_CODES = ERROR_CODES;
@@ -108,6 +109,15 @@ export function extractCsrfTokenFromHtml(html) {
  * `/top/ws` when the current document does not expose one.
  */
 export async function getCsrfToken(options = {}) {
+  try {
+    return await withRequestDeadline((signal) => loadCsrfToken({ ...options, signal }), options);
+  } catch (error) {
+    if (error instanceof CartError) throw error;
+    throw new CartError(CART_ERROR_CODES.CSRF_MISSING, "The CSRF token could not be loaded. Nothing was added to the cart.", { cause: error });
+  }
+}
+
+async function loadCsrfToken(options) {
   const documentRef = options.documentRef ?? defaultDocument();
   const fromCurrentPage = extractCsrfToken(documentRef);
   if (fromCurrentPage) {
@@ -338,12 +348,12 @@ function classifyHttpFailure(status, parsed, responseOk) {
  */
 export async function parseCartResponse(response, item = {}, attemptedQuantity = 0) {
   const responseStatus = numericResponseStatus(response);
+  if (responseStatus >= 500) return unknownResult(item, attemptedQuantity, responseStatus);
   let text;
   try {
     text = await response.text();
   } catch {
-    // A non-2xx status is already a definite server-side rejection.  A
-    // readable status such as 403/429/5xx therefore remains classifiable even
+    // A client rejection such as 403/429 remains classifiable even
     // if its body stream is interrupted.  For a 2xx response, however, the
     // server may have accepted the mutation before the body was lost.
     if (!responseIsOk(response)) {
@@ -373,15 +383,12 @@ export async function parseCartResponse(response, item = {}, attemptedQuantity =
   try {
     parsed = JSON.parse(String(text).replace(/^\uFEFF/u, ""));
   } catch {
-    const code = responseIsOk(response)
-      ? CART_ERROR_CODES.CART_RESPONSE_INVALID
-      : classifyHttpFailure(responseStatus, null, responseIsOk(response)).code;
+    if (responseIsOk(response)) return unknownResult(item, attemptedQuantity, responseStatus);
+    const code = classifyHttpFailure(responseStatus, null, false).code;
     return {
       ...resultBase(item, attemptedQuantity),
       outcome: "failed",
-      message: responseIsOk(response)
-        ? "YYT returned an invalid cart response."
-        : "YYT rejected this cart item with an unreadable response.",
+      message: "YYT rejected this cart item with an unreadable response.",
       responseStatus,
       code,
       errorCode: code,
@@ -401,6 +408,9 @@ export async function parseCartResponse(response, item = {}, attemptedQuantity =
     };
   }
 
+  if (responseIsOk(response) && (!parsed || typeof parsed.status !== "string" || !parsed.status.trim())) {
+    return unknownResult(item, attemptedQuantity, responseStatus);
+  }
   const classification = classifyHttpFailure(responseStatus, parsed, responseIsOk(response));
   return {
     ...resultBase(item, attemptedQuantity),
@@ -563,17 +573,17 @@ export async function addCartItem(productOrItem, plannedQuantity, options = {}) 
     return unknownResult(item, request.quantity);
   }
 
-  let response;
   try {
     // `quantity` is useful to the caller for result bookkeeping but is not a
     // RequestInit member; keep it out of the object handed to fetch.
     const { quantity: _quantity, ...requestInit } = request;
-    response = await fetchImpl(request.url, requestInit);
+    return await withRequestDeadline(async (requestSignal) => {
+      const response = await fetchImpl(request.url, { ...requestInit, signal: requestSignal });
+      return parseCartResponse(response, item, request.quantity);
+    }, options);
   } catch {
     return unknownResult(item, request.quantity);
   }
-
-  return parseCartResponse(response, item, request.quantity);
 }
 
 function isCancelled(options) {
