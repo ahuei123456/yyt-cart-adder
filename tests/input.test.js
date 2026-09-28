@@ -1,11 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  getSearchPrefix,
-  groupRequestsByPrefix,
-  normalizePrintedId,
-  parseInput,
-} from "../src/core/input.js";
+import { parseInput } from "../src/core/input.js";
+import { buildLookupPlan, getSearchPrefix } from "../src/core/lookup.js";
+import { normalizePrintedId } from "../src/core/parser.js";
 import { ERROR_CODES } from "../src/core/errors.js";
 
 test("normalizes IDs without removing punctuation or rarity suffixes", () => {
@@ -124,13 +121,11 @@ test("groups shared prefixes into one query and separates fallback IDs", () => {
     "UnusualCard 1",
   ].join("\n"));
 
-  const grouped = groupRequestsByPrefix(requests);
-  assert.equal(grouped.groups.length, 2);
-  assert.deepEqual(grouped.groups.map((group) => group.query), ["Kka/W102", "SMP/W99"]);
-  assert.deepEqual(grouped.groups.map((group) => group.normalizedPrefix), ["kka/w102", "smp/w99"]);
-  assert.equal(grouped.groups[0].requests.length, 2);
-  assert.equal(grouped.groups[1].requests.length, 1);
-  assert.deepEqual(grouped.exactFallback.map((request) => request.normalizedId), ["unusualcard"]);
+  const plan = buildLookupPlan(requests);
+  assert.deepEqual(plan.prefixQueries, ["Kka/W102", "SMP/W99"]);
+  assert.equal(plan.groups.get("Kka/W102").length, 2);
+  assert.equal(plan.groups.get("SMP/W99").length, 1);
+  assert.deepEqual(plan.fallbackIds.map((request) => request.normalizedId), ["unusualcard"]);
 });
 
 test("grouping preserves request and group order", () => {
@@ -140,9 +135,9 @@ test("grouping preserves request and group order", () => {
     "SMP/W99-002R",
     "Kka/W102-006SP",
   ].join("\n"));
-  const grouped = groupRequestsByPrefix(requests);
-  assert.deepEqual(grouped.groups.map((group) => group.prefix), ["SMP/W99", "Kka/W102"]);
-  assert.deepEqual(grouped.groups[0].requests.map((request) => request.normalizedId), [
+  const plan = buildLookupPlan(requests);
+  assert.deepEqual(plan.prefixQueries, ["SMP/W99", "Kka/W102"]);
+  assert.deepEqual(plan.groups.get("SMP/W99").map((request) => request.normalizedId), [
     "smp/w99-001r",
     "smp/w99-002r",
   ]);
@@ -155,9 +150,9 @@ test("unusual request objects are sent through exact fallback", () => {
     requestedQuantity: 1,
     sourceLines: [1],
   };
-  const grouped = groupRequestsByPrefix([request]);
-  assert.deepEqual(grouped.groups, []);
-  assert.deepEqual(grouped.exactFallback, [request]);
+  const plan = buildLookupPlan([request]);
+  assert.equal(plan.groups.size, 0);
+  assert.deepEqual(plan.fallbackIds, [request]);
 });
 
 test("parses damaged condition tokens in various delimiters", () => {

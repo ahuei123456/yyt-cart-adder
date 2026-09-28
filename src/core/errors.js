@@ -9,10 +9,15 @@ export const ERROR_CODES = Object.freeze({
   LOOKUP_NETWORK: "LOOKUP_NETWORK",
   LOOKUP_HTTP: "LOOKUP_HTTP",
   LOOKUP_SITE_CHANGED: "LOOKUP_SITE_CHANGED",
+  PRODUCT_INVALID: "PRODUCT_INVALID",
   PRODUCT_MISSING: "PRODUCT_MISSING",
+  PRODUCT_RARITY_MISSING: "PRODUCT_RARITY_MISSING",
+  PRODUCT_CONDITION_MISSING: "PRODUCT_CONDITION_MISSING",
   PRODUCT_AMBIGUOUS: "PRODUCT_AMBIGUOUS",
   PRODUCT_SOLD_OUT: "PRODUCT_SOLD_OUT",
   PRODUCT_PARTIAL_STOCK: "PRODUCT_PARTIAL_STOCK",
+  PRODUCT_OTHER_RARITY: "PRODUCT_OTHER_RARITY",
+  PRODUCT_OTHER_CONDITION: "PRODUCT_OTHER_CONDITION",
   CSRF_MISSING: "CSRF_MISSING",
   CART_REJECTED: "CART_REJECTED",
   CART_AUTH: "CART_AUTH",
@@ -22,10 +27,6 @@ export const ERROR_CODES = Object.freeze({
   CART_OUTCOME_UNKNOWN: "CART_OUTCOME_UNKNOWN",
   CANCELLED: "CANCELLED",
 });
-
-// A singular alias reads naturally at call sites while ERROR_CODES remains
-// the canonical export used by the rest of the application.
-export const ErrorCode = ERROR_CODES;
 
 /**
  * Error carrying one of the stable application error codes.
@@ -39,16 +40,4 @@ export class YytError extends Error {
       this.details = details;
     }
   }
-}
-
-/**
- * Construct a typed application error without exposing implementation-specific
- * error strings to callers that only need to inspect the code.
- */
-export function createYytError(code, message, details = undefined) {
-  return new YytError(code, message, details);
-}
-
-export function isYytError(value) {
-  return value instanceof YytError;
 }

@@ -1,6 +1,6 @@
 import { parseInput } from "./core/input.js";
 import { lookupProducts } from "./core/lookup.js";
-import { addCartItem, DEFAULT_CART_DELAY_MS, getCsrfToken } from "./core/cart.js";
+import { addCartItems, DEFAULT_CART_DELAY_MS } from "./core/cart.js";
 import { mountApp } from "./ui/app.js";
 
 function uiRow(row) {
@@ -26,15 +26,15 @@ mountApp({
       signal: options.signal,
       delayMs: 250,
       conditionPreference: options.conditionPreference,
+      onProgress: options.onProgress,
     });
     return resolved.rows.map(uiRow);
   },
-  getCsrfToken,
-  async addItem(row, csrfToken, options = {}) {
-    return addCartItem(row.product, row.plannedQuantity, {
-      csrfToken,
-      signal: options.signal,
+  addItems(rows, options = {}) {
+    return addCartItems(rows, {
+      isCancelled: options.isCancelled,
+      onProgress: options.onProgress,
+      delayMs: DEFAULT_CART_DELAY_MS,
     });
   },
-  mutationDelayMs: DEFAULT_CART_DELAY_MS,
 });

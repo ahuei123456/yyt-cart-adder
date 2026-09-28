@@ -7,7 +7,6 @@ import {
   buildLookupPlan,
   groupIdsByPrefix,
   getSearchPrefix,
-  lookupCards,
   lookupProducts,
 } from "../src/core/lookup.js";
 
@@ -56,6 +55,30 @@ test("groups shared prefixes into one query and sends unusual IDs to fallback", 
   assert.deepEqual(plan.fallbackIds, ["unusual-id"]);
 });
 
+test("reports each search as it starts, per phase", async () => {
+  const mock = fakeFetch({ "Kka/W102": fixture("search-prefix.html") });
+  const progress = [];
+  await lookupProducts(
+    [
+      { originalId: "Kka/W102-005SEC", requestedQuantity: 1 },
+      { originalId: "unusual-id", requestedQuantity: 1 },
+    ],
+    {
+      fetch: mock.fetch,
+      delayMs: 0,
+      onProgress: (event) => {
+        progress.push(event);
+        throw new Error("a failing callback must not stop the lookup");
+      },
+    },
+  );
+
+  assert.deepEqual(progress, [
+    { type: "prefix", query: "Kka/W102", index: 0, total: 1 },
+    { type: "exact", query: "unusual-id", index: 0, total: 1 },
+  ]);
+});
+
 test("performs one grouped lookup and returns exact rows", async () => {
   const mock = fakeFetch({ "Kka/W102": fixture("search-prefix.html") });
   const result = await lookupProducts(
@@ -80,7 +103,7 @@ test("falls back to exact search for an ID absent from the prefix page", async (
     "Kka/W102": fixture("search-prefix.html"),
     "Kka/W102-011R": fixture("search-empty.html"),
   });
-  const result = await lookupCards(
+  const result = await lookupProducts(
     [
       "Kka/W102-005SEC",
       "Kka/W102-011R",

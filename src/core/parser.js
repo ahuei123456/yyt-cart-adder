@@ -8,6 +8,8 @@
  * an HTML reader; it never evaluates script elements.
  */
 
+import { ERROR_CODES } from "./errors.js";
+
 export const PRINTED_ID_PATTERN =
   /[A-Za-z0-9][A-Za-z0-9._]*\/[A-Za-z0-9][A-Za-z0-9._-]*-(?:\d{1,4}|[A-Za-z]{1,6}\d{0,4})(?:[A-Za-z0-9+._']*)/g;
 
@@ -261,7 +263,7 @@ function containsSoldOut(element) {
 
 function requiredFieldError(field) {
   return {
-    code: "PRODUCT_INVALID",
+    code: ERROR_CODES.PRODUCT_INVALID,
     reason: `missing or invalid ${field}`,
     field,
   };
@@ -353,10 +355,6 @@ function parseProductElementDetailed(element, sectionRarity = null) {
 export function parseProductElement(element) {
   return parseProductElementDetailed(element).product;
 }
-
-// Aliases make the parser easy to consume from a small userscript and from
-// tests written around either the noun used by the handoff or the CSS class.
-export const parseCardProduct = parseProductElement;
 
 function looksLikeExplicitEmptyResult(html) {
   const text = cleanText(String(html ?? ""));
@@ -556,17 +554,12 @@ export function parseSearchResults(html, options = {}) {
   }
 
   const explicitEmpty = looksLikeExplicitEmptyResult(source);
-  const onlyDamagedCandidates =
-    cardElements.length > 0 &&
-    rejected.length > 0 &&
-    rejected.every((error) => error?.code === "PRODUCT_DAMAGED");
   const structureError =
-    (cardElements.length > 0 && products.length === 0 && !onlyDamagedCandidates) ||
+    (cardElements.length > 0 && products.length === 0) ||
     (cardElements.length === 0 && source.trim() !== "" && !explicitEmpty);
 
   return {
     products,
-    candidates: products,
     rejected,
     cardProductCount: cardElements.length,
     structureError,
@@ -582,7 +575,3 @@ export function parseSearchResults(html, options = {}) {
 export function parseSearchHtml(html, options = {}) {
   return parseSearchResults(html, options).products;
 }
-
-export const parseProductsFromHtml = parseSearchHtml;
-export const parseCardProducts = parseSearchHtml;
-export const parseSearchDocument = parseSearchHtml;

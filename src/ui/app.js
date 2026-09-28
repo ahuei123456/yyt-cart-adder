@@ -1,3 +1,5 @@
+import { ERROR_CODES } from "../core/errors.js";
+import { productKey } from "../core/lookup.js";
 import { styles } from "./styles.js";
 
 const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 });
@@ -20,14 +22,14 @@ function statusReason(row) {
   const also = row.otherRarities?.length ? ` (also sold as ${row.otherRarities.join(", ")})` : "";
   const messages = {
     ready: `Ready${also}`,
-    option: row.reason === "PRODUCT_OTHER_CONDITION"
+    option: row.reason === ERROR_CODES.PRODUCT_OTHER_CONDITION
       ? `${cond === "damaged" ? "Damaged" : "Normal"} copy; set a quantity to add`
       : `Same ID in another rarity${also}; set a quantity to add`,
     partial: `Requested ${row.requestedQuantity}; adding ${row.plannedQuantity}`,
     "sold-out": `Card is sold out in ${cond} condition`,
-    missing: row.reason === "PRODUCT_RARITY_MISSING"
+    missing: row.reason === ERROR_CODES.PRODUCT_RARITY_MISSING
       ? `No ${row.rarity} product for this ID`
-      : row.reason === "PRODUCT_CONDITION_MISSING"
+      : row.reason === ERROR_CODES.PRODUCT_CONDITION_MISSING
         ? `No ${cond} copy for this ID`
         : "No exact card found",
     ambiguous: "Multiple exact products found; skipped",
@@ -36,7 +38,7 @@ function statusReason(row) {
   return messages[row.status] || row.reason || row.status;
 }
 
-export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayMs = 750 }) {
+export function mountApp({ parse, resolve, addItems }) {
   const host = document.createElement("div");
   host.id = "yyt-cart-adder-host";
   document.documentElement.append(host);
@@ -54,13 +56,18 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
 
   let previousFocus = null;
   let lookupController = null;
-  let addController = null;
   let cancelRequested = false;
   let adding = false;
+  // Set while a batch is running so closing the dialog cancels it the same
+  // way the Cancel button does.
+  let requestCancel = null;
+  // A batch that finishes while the dialog is closed leaves its results in
+  // place for the next open instead of being replaced by a blank input view.
+  let resultsUnseen = false;
 
   const setView = (...nodes) => body.replaceChildren(el("div", { className: "view" }, ...nodes));
   const close = () => {
-    if (adding && !cancelRequested) cancelRequested = true;
+    if (adding) requestCancel?.();
     lookupController?.abort();
     backdrop.hidden = true;
     previousFocus?.focus?.();
@@ -68,7 +75,9 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
   const open = () => {
     previousFocus = document.activeElement;
     backdrop.hidden = false;
-    showInput();
+    // While a batch is still running, reopening returns to its progress view.
+    if (!adding && !resultsUnseen) showInput();
+    resultsUnseen = false;
   };
 
   launcher.addEventListener("click", open);
@@ -77,7 +86,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
   root.addEventListener("keydown", (event) => {
     if (event.key === "Escape") close();
     if (event.key === "Tab" && !backdrop.hidden) {
-      const focusable = [...panel.querySelectorAll("button:not(:disabled), textarea, input:not(:disabled), a[href]")];
+      const focusable = [...panel.querySelectorAll("button:not(:disabled), textarea, select:not(:disabled), input:not(:disabled), a[href]")];
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable.at(-1);
@@ -87,8 +96,6 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
   });
 
   function showInput(saved = "", savedPref = "prefer-normal") {
-    adding = false;
-    cancelRequested = false;
     const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2 damaged\nRZ/SE35-01 1 S-RR" });
     input.value = saved;
     const prefSelect = el("select", { id: "yyt-condition-preference", className: "select-pref" },
@@ -105,7 +112,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
       try { parsed = parse(input.value); }
       catch (error) { errorBox.hidden = false; errorBox.textContent = error.message || "Could not parse input."; return; }
       if (!parsed.requests.length) {
-        const errList = parsed.invalid || parsed.errors || [];
+        const errList = parsed.errors;
         errorBox.hidden = false;
         errorBox.textContent = errList.length ? errList.map((x) => `Line ${x.lineNumber}: ${x.reason || x.message}`).join("\n") : "Enter at least one card ID.";
         return;
@@ -132,9 +139,13 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
       const rows = await resolve(parsed.requests, {
         signal: lookupController.signal,
         conditionPreference,
-        onProgress: (text) => { message.textContent = text; },
+        onProgress: ({ type, query, index, total }) => {
+          message.textContent = type === "exact"
+            ? `Searching individually for ${query} (${index + 1} of ${total})…`
+            : `Searching ${query} (${index + 1} of ${total})…`;
+        },
       });
-      const invalidRows = (parsed.invalid || parsed.errors || []).map((item) => ({
+      const invalidRows = parsed.errors.map((item) => ({
         ...item,
         status: "invalid",
         requestedId: item.original || "—",
@@ -170,7 +181,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
       const damagedCards = chosen.filter((r) => r.condition === "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
       const total = chosen.reduce((n, r) => n + (r.priceYen || 0) * r.plannedQuantity, 0);
 
-      const productCount = new Set(chosen.map((r) => (r.product ? [r.product.ver, r.product.cid, r.product.kizu].join("|") : r))).size;
+      const productCount = new Set(chosen.map((r) => productKey(r.product) ?? r)).size;
       let desc = `${productCount} product${productCount === 1 ? "" : "s"} / ${totalCards} card${totalCards === 1 ? "" : "s"}`;
       if (damagedCards > 0 && normalCards > 0) {
         desc += ` (${normalCards} normal, ${damagedCards} damaged)`;
@@ -200,7 +211,7 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
       // `ID 1 normal`); each row is capped at stock but their sum may not be.
       const byProduct = new Map();
       for (const r of rows) {
-        const key = r.product ? [r.product.ver, r.product.cid, r.product.kizu].join("|") : null;
+        const key = productKey(r.product);
         if (!key) continue;
         if (!byProduct.has(key)) byProduct.set(key, []);
         byProduct.get(key).push(r);
@@ -323,41 +334,40 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
   async function runBatch(allRows, chosen, source, conditionPreference) {
     adding = true;
     cancelRequested = false;
-    addController = new AbortController();
-    const results = [];
-    const current = el("p", { text: "Preparing…" });
+    const describe = (row, index) =>
+      `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${chosen.length})…`;
+    const current = el("p", { text: describe(chosen[0], 0) });
     const progress = el("progress", { className: "progress", max: chosen.length, value: 0 });
     const cancel = el("button", { className: "danger", type: "button", text: "Cancel before next item" });
-    cancel.addEventListener("click", () => { cancelRequested = true; cancel.disabled = true; current.textContent = "Cancellation requested; finishing the current request…"; });
+    requestCancel = () => {
+      cancelRequested = true;
+      cancel.disabled = true;
+      current.textContent = "Cancellation requested; finishing the current request…";
+    };
+    cancel.addEventListener("click", requestCancel);
     setView(el("h3", { text: "Adding products one at a time" }), current, progress,
       el("p", { className: "hint", text: "Cancel affects only products not yet started. It cannot undo additions already completed." }), el("div", { className: "actions" }, cancel));
 
-    let token;
-    try { token = await getCsrfToken({ signal: addController.signal }); }
-    catch (error) {
-      adding = false;
-      showResults(allRows, chosen, [{ outcome: "failed", message: error.message || "Could not obtain a CSRF token." }], source, conditionPreference);
-      return;
-    }
-    for (let index = 0; index < chosen.length; index += 1) {
-      const row = chosen[index];
-      if (cancelRequested) {
-        for (const pending of chosen.slice(index)) results.push({ row: pending, outcome: "skipped", message: "Cancelled before request" });
-        break;
-      }
-      current.textContent = `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${chosen.length})…`;
-      let result;
-      try { result = await addItem(row, token, { signal: addController.signal }); }
-      catch (error) { result = { outcome: "unknown", message: error.message || "Response was lost; inspect the cart before retrying." }; }
-      results.push({ row, ...result });
-      progress.value = index + 1;
-      if (result.stopBatch || result.outcome === "unknown") {
-        for (const pending of chosen.slice(index + 1)) results.push({ row: pending, outcome: "skipped", message: "Batch stopped before request" });
-        break;
-      }
-      if (result.outcome === "success" && index < chosen.length - 1) await new Promise((resolveDelay) => setTimeout(resolveDelay, mutationDelayMs));
+    let results;
+    try {
+      const batch = await addItems(chosen, {
+        isCancelled: () => cancelRequested,
+        onProgress: ({ completedCount }) => {
+          progress.value = completedCount;
+          if (!cancelRequested && completedCount < chosen.length) {
+            current.textContent = describe(chosen[completedCount], completedCount);
+          }
+        },
+      });
+      results = batch.results.map((result, index) => ({ row: chosen[index], ...result }));
+    } catch (error) {
+      // addItems reports every per-item outcome itself; a throw means the
+      // batch runner failed and it is not known what reached the cart.
+      results = [{ outcome: "unknown", message: error.message || "The batch stopped unexpectedly; inspect the cart before retrying." }];
     }
     adding = false;
+    requestCancel = null;
+    if (backdrop.hidden) resultsUnseen = true;
     showResults(allRows, chosen, results, source, conditionPreference);
   }
 
@@ -383,9 +393,11 @@ export function mountApp({ parse, resolve, getCsrfToken, addItem, mutationDelayM
       const cond = [r.row?.rarity, r.row?.condition].filter(Boolean).map((x) => ` [${x}]`).join("");
       return `${label}: ${r.row?.printedId || r.row?.requestedId || "Batch"}${cond} — ${r.message || key}`;
     })).join("\n");
-    const copy = el("button", { type: "button", text: "Copy report", onClick: async (event) => {
-      try { await navigator.clipboard.writeText(report); event.currentTarget.textContent = "Copied"; }
-      catch { event.currentTarget.textContent = "Copy failed"; }
+    // Refer to the button directly: event.currentTarget is null once the
+    // handler resumes after the clipboard await.
+    const copy = el("button", { type: "button", text: "Copy report", onClick: async () => {
+      try { await navigator.clipboard.writeText(report); copy.textContent = "Copied"; }
+      catch { copy.textContent = "Copy failed"; }
     } });
     setView(el("h3", { text: "Results" }),
       hasUnknown ? el("div", { className: "error", text: "A cart request has an unknown outcome. Do not retry it until you inspect the cart." }) : null,

@@ -192,29 +192,6 @@ export function buildLookupPlan(values) {
   };
 }
 
-export const groupLookupIds = groupIdsByPrefix;
-export const planLookupQueries = buildLookupPlan;
-
-/**
- * Compatibility-shaped grouping helper for callers that already use the
- * input parser's `{ groups, exactFallback }` representation.  The lookup
- * layer itself uses the Map-returning helper above so it can accept raw IDs as
- * well as parsed request objects.
- */
-export function groupRequestsByPrefix(values) {
-  const groups = groupIdsByPrefix(values);
-  const groupedValues = new Set([...groups.values()].flat());
-  return {
-    groups: [...groups.entries()].map(([prefix, requests]) => ({
-      prefix,
-      normalizedPrefix: normalizePrintedId(prefix),
-      query: prefix,
-      requests,
-    })),
-    exactFallback: values.filter((value) => !groupedValues.has(value)),
-  };
-}
-
 function getFetch(options) {
   const fetchFunction = options.fetch ?? options.fetchFn ?? options.fetchImpl;
   if (typeof fetchFunction === "function") return fetchFunction;
@@ -357,7 +334,6 @@ function parserReport(html, options) {
   if (Array.isArray(parsed)) {
     return {
       products: parsed,
-      candidates: parsed,
       rejected: [],
       cardProductCount: parsed.length,
       structureError: false,
@@ -403,7 +379,7 @@ function makeInvalidRow(request) {
   return {
     ...request,
     status: "invalid",
-    reason: "INPUT_INVALID",
+    reason: ERROR_CODES.INPUT_INVALID,
     canonicalPrintedId: null,
     product: null,
     name: "",
@@ -415,7 +391,7 @@ function makeInvalidRow(request) {
   };
 }
 
-function makeMissingRow(request, reason = "PRODUCT_MISSING") {
+function makeMissingRow(request, reason = ERROR_CODES.PRODUCT_MISSING) {
   return {
     ...request,
     status: "missing",
@@ -436,7 +412,7 @@ function makeAmbiguousRow(request, candidates) {
   return {
     ...request,
     status: "ambiguous",
-    reason: "PRODUCT_AMBIGUOUS",
+    reason: ERROR_CODES.PRODUCT_AMBIGUOUS,
     canonicalPrintedId: null,
     product: null,
     name: "",
@@ -465,8 +441,8 @@ function buildRow(request, product, plannedQuantity, stock, statusOverride = nul
       status === "ready"
         ? null
         : status === "partial"
-          ? "PRODUCT_PARTIAL_STOCK"
-          : "PRODUCT_SOLD_OUT",
+          ? ERROR_CODES.PRODUCT_PARTIAL_STOCK
+          : ERROR_CODES.PRODUCT_SOLD_OUT,
     canonicalPrintedId: product.printedId,
     rarity: product.rarity ?? null,
     condition: product.condition || (product.kizu === "0" ? "normal" : "damaged"),
@@ -504,7 +480,7 @@ function asOption(row, reason) {
   return {
     ...row,
     status: row.status === "sold-out" ? "sold-out" : "option",
-    reason: row.status === "sold-out" ? "PRODUCT_SOLD_OUT" : reason,
+    reason: row.status === "sold-out" ? ERROR_CODES.PRODUCT_SOLD_OUT : reason,
     plannedQuantity: 0,
     selected: false,
     isOption: true,
@@ -562,7 +538,7 @@ export function makeRows(request, candidates, options = {}) {
 
   if (request.rarity) {
     const matching = exact.filter((c) => normalizeRarity(c.rarity) === request.rarity);
-    if (matching.length === 0) return [makeMissingRow(request, "PRODUCT_RARITY_MISSING")];
+    if (matching.length === 0) return [makeMissingRow(request, ERROR_CODES.PRODUCT_RARITY_MISSING)];
     return makeConditionRows(request, matching, options);
   }
 
@@ -579,7 +555,7 @@ export function makeRows(request, candidates, options = {}) {
     rows
       .filter((row) => index === primaryIndex || row.status !== "missing")
       .map((row) => ({
-        ...(index === primaryIndex ? row : asOption(row, "PRODUCT_OTHER_RARITY")),
+        ...(index === primaryIndex ? row : asOption(row, ERROR_CODES.PRODUCT_OTHER_RARITY)),
         otherRarities: rarities.filter((rarity) => rarity !== groups[index].rarity),
       })),
   );
@@ -602,10 +578,10 @@ function makeConditionRows(request, exact, options) {
     if (wanted.length > 1) return [makeAmbiguousRow(request, wanted)];
     const primary = wanted.length
       ? makeSingleRow(request, wanted[0], request.requestedQuantity)
-      : { ...makeMissingRow(request, "PRODUCT_CONDITION_MISSING"), condition: strict };
+      : { ...makeMissingRow(request, ERROR_CODES.PRODUCT_CONDITION_MISSING), condition: strict };
     if (other.length !== 1) return [primary];
     const otherRow = buildRow(request, other[0], 0, numbersForProduct(other[0]).stock);
-    return [primary, asOption(otherRow, "PRODUCT_OTHER_CONDITION")];
+    return [primary, asOption(otherRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
   }
 
   // No condition given: prefer-normal or prefer-damaged fills from that
@@ -640,7 +616,7 @@ function makeConditionRows(request, exact, options) {
       normalRow.selected = normalPlanned > 0;
       // A fallback the preferred condition fully covered adds nothing; show
       // it like any other zero-quantity option.
-      return [damagedRow, normalPlanned > 0 ? normalRow : asOption(normalRow, "PRODUCT_OTHER_CONDITION")];
+      return [damagedRow, normalPlanned > 0 ? normalRow : asOption(normalRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
     } else {
       // prefer-normal
       const normalPlanned = Math.min(totalRequested, normalStock);
@@ -653,15 +629,20 @@ function makeConditionRows(request, exact, options) {
       normalRow.selected = normalPlanned > 0;
       const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
       damagedRow.selected = damagedPlanned > 0;
-      return [normalRow, damagedPlanned > 0 ? damagedRow : asOption(damagedRow, "PRODUCT_OTHER_CONDITION")];
+      return [normalRow, damagedPlanned > 0 ? damagedRow : asOption(damagedRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
     }
   }
 
   return [makeMissingRow(request)];
 }
 
-export function makeRow(request, candidates, options = {}) {
-  return makeRows(request, candidates, options)[0];
+function notifyProgress(options, progress) {
+  if (typeof options.onProgress !== "function") return;
+  try {
+    options.onProgress(progress);
+  } catch {
+    // A UI callback must never interrupt a lookup.
+  }
 }
 
 async function delayBetweenQueries(options, queryNumber) {
@@ -714,9 +695,12 @@ export async function lookupProducts(requests, options = {}) {
   }
 
   let queryNumber = 0;
+  let groupIndex = 0;
   for (const [prefix, values] of groups) {
     await delayBetweenQueries(options, queryNumber);
     queryNumber += 1;
+    notifyProgress(options, { type: "prefix", query: prefix, index: groupIndex, total: groups.size });
+    groupIndex += 1;
     const page = await fetchSearchPage(prefix, options);
     const parsed = parserReport(page.html, { ...options, expectedIds: queryExpectedIds(values) });
     assertStructure(parsed, prefix, queryExpectedIds(values));
@@ -746,9 +730,15 @@ export async function lookupProducts(requests, options = {}) {
     exactFallbacks.push(request);
   }
 
-  for (const request of exactFallbacks) {
+  for (const [fallbackIndex, request] of exactFallbacks.entries()) {
     await delayBetweenQueries(options, queryNumber);
     queryNumber += 1;
+    notifyProgress(options, {
+      type: "exact",
+      query: request.originalId,
+      index: fallbackIndex,
+      total: exactFallbacks.length,
+    });
     const page = await fetchSearchPage(request.originalId, options);
     const parsed = parserReport(page.html, { ...options, expectedIds: new Set([request.normalizedId]) });
     assertStructure(parsed, request.originalId, new Set([request.normalizedId]));
@@ -771,16 +761,8 @@ export async function lookupProducts(requests, options = {}) {
   );
   return {
     rows,
-    items: rows,
-    results: rows,
     requests: normalizedRequests,
     queries,
     candidatesById,
   };
 }
-
-export const lookupCards = lookupProducts;
-export const resolveCards = lookupProducts;
-export const lookupPrintedIds = lookupProducts;
-export const searchCards = lookupProducts;
-export const resolveLookup = lookupProducts;

@@ -7,7 +7,7 @@
  * without a browser or a live cart.
  */
 
-import { ERROR_CODES } from "./errors.js";
+import { ERROR_CODES, YytError } from "./errors.js";
 
 export { ERROR_CODES };
 export const CART_ERROR_CODES = ERROR_CODES;
@@ -26,11 +26,10 @@ const MAX_REPORT_MESSAGE_LENGTH = 180;
  * report without accidentally treating an unknown mutation outcome as safe
  * to retry.
  */
-export class CartError extends Error {
+export class CartError extends YytError {
   constructor(code, message, details = {}) {
-    super(message);
+    super(code, message);
     this.name = "CartError";
-    this.code = code;
     this.responseStatus = details.responseStatus ?? null;
     this.stopBatch = details.stopBatch ?? true;
     if (details.cause !== undefined) {
@@ -516,7 +515,7 @@ function prepareQuantity(product, plannedQuantity) {
   if (available === 0 || product.soldOut === true || product.available === false) {
     throw new CartError(
       CART_ERROR_CODES.PRODUCT_SOLD_OUT,
-      "This product is no longer available in normal condition.",
+      `This product is no longer available in ${String(product.kizu ?? "0") === "0" ? "normal" : "damaged"} condition.`,
     );
   }
   return available == null ? requested : Math.min(requested, available, 99);
@@ -832,7 +831,7 @@ export async function addCartItems(items, options = {}) {
       break;
     }
 
-    if (result.outcome === "unknown" || result.stopBatch || options.stopOnUnknown !== false && result.outcome === "unknown") {
+    if (result.outcome === "unknown" || result.stopBatch) {
       stopped = true;
       stopCode = result.code ?? CART_ERROR_CODES.CART_OUTCOME_UNKNOWN;
       stopMessage = result.message;
@@ -853,10 +852,3 @@ export async function addCartItems(items, options = {}) {
     successfulCount,
   };
 }
-
-// Friendly aliases for callers that use “add to cart” terminology.
-export const addToCart = addCartItem;
-export const addItem = addCartItem;
-export const addToCartBatch = addCartItems;
-export const addItems = addCartItems;
-export const acquireCsrfToken = getCsrfToken;

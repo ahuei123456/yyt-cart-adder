@@ -14,10 +14,15 @@
     LOOKUP_NETWORK: "LOOKUP_NETWORK",
     LOOKUP_HTTP: "LOOKUP_HTTP",
     LOOKUP_SITE_CHANGED: "LOOKUP_SITE_CHANGED",
+    PRODUCT_INVALID: "PRODUCT_INVALID",
     PRODUCT_MISSING: "PRODUCT_MISSING",
+    PRODUCT_RARITY_MISSING: "PRODUCT_RARITY_MISSING",
+    PRODUCT_CONDITION_MISSING: "PRODUCT_CONDITION_MISSING",
     PRODUCT_AMBIGUOUS: "PRODUCT_AMBIGUOUS",
     PRODUCT_SOLD_OUT: "PRODUCT_SOLD_OUT",
     PRODUCT_PARTIAL_STOCK: "PRODUCT_PARTIAL_STOCK",
+    PRODUCT_OTHER_RARITY: "PRODUCT_OTHER_RARITY",
+    PRODUCT_OTHER_CONDITION: "PRODUCT_OTHER_CONDITION",
     CSRF_MISSING: "CSRF_MISSING",
     CART_REJECTED: "CART_REJECTED",
     CART_AUTH: "CART_AUTH",
@@ -37,214 +42,6 @@
       }
     }
   };
-  function createYytError(code, message, details = void 0) {
-    return new YytError(code, message, details);
-  }
-
-  // src/core/input.js
-  var INTEGER_PATTERN = /^\d+$/u;
-  var CARD_TOKEN_PATTERN = /^\S+$/u;
-  function normalizePrintedId(value) {
-    if (typeof value !== "string") {
-      return "";
-    }
-    return value.trim().toLocaleLowerCase("en-US");
-  }
-  function makeInputError({ lineNumber, raw, message, lineNumbers = [lineNumber], normalizedId, original }) {
-    const error = createYytError(ERROR_CODES.INPUT_INVALID, message, {
-      lineNumber,
-      lineNumbers,
-      raw,
-      ...normalizedId ? { normalizedId } : {}
-    });
-    return {
-      code: error.code,
-      message: error.message,
-      reason: error.message,
-      lineNumber,
-      lineNumbers,
-      raw,
-      ...original ? { original } : {},
-      ...normalizedId ? { normalizedId } : {}
-    };
-  }
-  function parseConditionToken(token) {
-    if (typeof token !== "string") return null;
-    const lower = token.trim().toLowerCase();
-    if (lower === "damaged" || lower === "damage" || lower === "kizu" || lower === "1") {
-      return "damaged";
-    }
-    if (lower === "normal" || lower === "0") {
-      return "normal";
-    }
-    return null;
-  }
-  var RARITY_TOKEN_PATTERN = /^(?:[A-Z]{1,2}-)?[A-Z]{1,4}\+?$/u;
-  function parseRarityToken(token) {
-    if (typeof token !== "string" || !RARITY_TOKEN_PATTERN.test(token)) return null;
-    return token;
-  }
-  function parseLine(raw, lineNumber) {
-    const trimmed = raw.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      return { kind: "ignored" };
-    }
-    const idMatch = /^([^\s,]+)([\s,].*)?$/u.exec(trimmed);
-    if (!idMatch) {
-      return {
-        kind: "error",
-        error: makeInputError({
-          lineNumber,
-          raw,
-          message: "Card ID is required and may not contain whitespace."
-        })
-      };
-    }
-    const originalId = idMatch[1];
-    const normalizedId = normalizePrintedId(originalId);
-    if (!normalizedId || !CARD_TOKEN_PATTERN.test(originalId)) {
-      return {
-        kind: "error",
-        error: makeInputError({
-          lineNumber,
-          raw,
-          message: "Card ID is required and may not contain whitespace."
-        })
-      };
-    }
-    const remainder = idMatch[2]?.trim() ?? "";
-    if (!remainder) {
-      return {
-        kind: "request",
-        request: { originalId, normalizedId, quantity: 1, lineNumber }
-      };
-    }
-    if (remainder.includes(",,") || remainder.endsWith(",")) {
-      return {
-        kind: "error",
-        error: makeInputError({
-          lineNumber,
-          raw,
-          original: originalId,
-          normalizedId,
-          message: "Quantity must be a whole number from 1 through 99."
-        })
-      };
-    }
-    const tokens = remainder.split(/[\s,]+/u).filter(Boolean);
-    const tokenError = (message) => ({
-      kind: "error",
-      error: makeInputError({ lineNumber, raw, original: originalId, normalizedId, message })
-    });
-    if (tokens.length > 3) {
-      return tokenError("Unexpected extra tokens on line.");
-    }
-    let quantity = 1;
-    let condition = null;
-    let rarity = null;
-    let rest = tokens;
-    if (INTEGER_PATTERN.test(rest[0])) {
-      const parsedQty = Number(rest[0]);
-      if (!Number.isSafeInteger(parsedQty) || parsedQty < 1 || parsedQty > 99) {
-        return tokenError("Quantity must be a whole number from 1 through 99.");
-      }
-      quantity = parsedQty;
-      rest = rest.slice(1);
-    }
-    for (const token of rest) {
-      const parsedCondition = parseConditionToken(token);
-      if (parsedCondition && !condition) {
-        condition = parsedCondition;
-        continue;
-      }
-      const parsedRarity = parseRarityToken(token);
-      if (parsedRarity && !rarity) {
-        rarity = parsedRarity;
-        continue;
-      }
-      return tokenError(
-        token === tokens[0] ? "Quantity must be a whole number from 1 through 99." : "Expected a condition ('damaged'/1 or 'normal'/0) or a rarity such as RR or S-RR."
-      );
-    }
-    const request = { originalId, normalizedId, quantity, lineNumber };
-    if (condition) {
-      request.condition = condition;
-    }
-    if (rarity) {
-      request.rarity = rarity;
-    }
-    return {
-      kind: "request",
-      request
-    };
-  }
-  function parseInput(input) {
-    if (typeof input !== "string") {
-      throw new TypeError("Input must be a string.");
-    }
-    const requestsById = /* @__PURE__ */ new Map();
-    const errors = [];
-    input.split(/\r?\n/u).forEach((raw, index) => {
-      const lineNumber = index + 1;
-      const parsed = parseLine(raw, lineNumber);
-      if (parsed.kind === "ignored") {
-        return;
-      }
-      if (parsed.kind === "error") {
-        errors.push(parsed.error);
-        return;
-      }
-      const { originalId, normalizedId, quantity, condition, rarity, lineNumber: sourceLine } = parsed.request;
-      const key = `${normalizedId}:${condition ?? ""}:${rarity ?? ""}`;
-      const existing = requestsById.get(key);
-      if (existing) {
-        existing.originalIds.push(originalId);
-        existing.sourceLines.push(sourceLine);
-        existing.requestedQuantity += quantity;
-        return;
-      }
-      const item = {
-        originalIds: [originalId],
-        normalizedId,
-        requestedQuantity: quantity,
-        sourceLines: [sourceLine]
-      };
-      if (condition) {
-        item.condition = condition;
-      }
-      if (rarity) {
-        item.rarity = rarity;
-      }
-      requestsById.set(key, item);
-    });
-    for (const [key, request] of requestsById) {
-      if (request.requestedQuantity <= 99) {
-        continue;
-      }
-      errors.push(
-        makeInputError({
-          lineNumber: request.sourceLines[0],
-          lineNumbers: [...request.sourceLines],
-          raw: request.originalIds.join(", "),
-          original: request.originalIds[0],
-          normalizedId: request.normalizedId,
-          message: `Combined quantity for ${request.originalIds[0]} exceeds the maximum of 99.`
-        })
-      );
-      requestsById.delete(key);
-    }
-    errors.sort((left, right) => left.lineNumber - right.lineNumber);
-    const result = {
-      requests: [...requestsById.values()],
-      errors
-    };
-    Object.defineProperty(result, "invalid", {
-      enumerable: false,
-      configurable: false,
-      get: () => result.errors
-    });
-    return result;
-  }
 
   // src/core/parser.js
   var PRINTED_ID_PATTERN = /[A-Za-z0-9][A-Za-z0-9._]*\/[A-Za-z0-9][A-Za-z0-9._-]*-(?:\d{1,4}|[A-Za-z]{1,6}\d{0,4})(?:[A-Za-z0-9+._']*)/g;
@@ -275,7 +72,7 @@
     "track",
     "wbr"
   ]);
-  function normalizePrintedId2(value) {
+  function normalizePrintedId(value) {
     return String(value ?? "").trim().toLocaleLowerCase("en-US");
   }
   function extractPrintedId(value) {
@@ -410,7 +207,7 @@
   }
   function requiredFieldError(field) {
     return {
-      code: "PRODUCT_INVALID",
+      code: ERROR_CODES.PRODUCT_INVALID,
       reason: `missing or invalid ${field}`,
       field
     };
@@ -462,7 +259,7 @@
     const stock = Math.min(active, limit);
     const product = {
       printedId,
-      normalizedId: normalizePrintedId2(printedId),
+      normalizedId: normalizePrintedId(printedId),
       rarity: readRarity(element, printedId, sectionRarity),
       name: nodeText(queryOne(element, "h4")),
       gid: String(gid),
@@ -638,16 +435,201 @@
       else rejected.push(parsed.error);
     }
     const explicitEmpty = looksLikeExplicitEmptyResult(source);
-    const onlyDamagedCandidates = cardElements.length > 0 && rejected.length > 0 && rejected.every((error) => error?.code === "PRODUCT_DAMAGED");
-    const structureError = cardElements.length > 0 && products.length === 0 && !onlyDamagedCandidates || cardElements.length === 0 && source.trim() !== "" && !explicitEmpty;
+    const structureError = cardElements.length > 0 && products.length === 0 || cardElements.length === 0 && source.trim() !== "" && !explicitEmpty;
     return {
       products,
-      candidates: products,
       rejected,
       cardProductCount: cardElements.length,
       structureError,
       explicitEmpty,
       document: document2
+    };
+  }
+
+  // src/core/input.js
+  var INTEGER_PATTERN = /^\d+$/u;
+  var CARD_TOKEN_PATTERN = /^\S+$/u;
+  function makeInputError({ lineNumber, raw, message, lineNumbers = [lineNumber], normalizedId, original }) {
+    return {
+      code: ERROR_CODES.INPUT_INVALID,
+      message,
+      reason: message,
+      lineNumber,
+      lineNumbers,
+      raw,
+      ...original ? { original } : {},
+      ...normalizedId ? { normalizedId } : {}
+    };
+  }
+  function parseConditionToken(token) {
+    if (typeof token !== "string") return null;
+    const lower = token.trim().toLowerCase();
+    if (lower === "damaged" || lower === "damage" || lower === "kizu" || lower === "1") {
+      return "damaged";
+    }
+    if (lower === "normal" || lower === "0") {
+      return "normal";
+    }
+    return null;
+  }
+  var RARITY_TOKEN_PATTERN = /^(?:[A-Z]{1,2}-)?[A-Z]{1,4}\+?$/u;
+  function parseRarityToken(token) {
+    if (typeof token !== "string" || !RARITY_TOKEN_PATTERN.test(token)) return null;
+    return token;
+  }
+  function parseLine(raw, lineNumber) {
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      return { kind: "ignored" };
+    }
+    const idMatch = /^([^\s,]+)([\s,].*)?$/u.exec(trimmed);
+    if (!idMatch) {
+      return {
+        kind: "error",
+        error: makeInputError({
+          lineNumber,
+          raw,
+          message: "Card ID is required and may not contain whitespace."
+        })
+      };
+    }
+    const originalId = idMatch[1];
+    const normalizedId = normalizePrintedId(originalId);
+    if (!normalizedId || !CARD_TOKEN_PATTERN.test(originalId)) {
+      return {
+        kind: "error",
+        error: makeInputError({
+          lineNumber,
+          raw,
+          message: "Card ID is required and may not contain whitespace."
+        })
+      };
+    }
+    const remainder = idMatch[2]?.trim() ?? "";
+    if (!remainder) {
+      return {
+        kind: "request",
+        request: { originalId, normalizedId, quantity: 1, lineNumber }
+      };
+    }
+    if (remainder.includes(",,") || remainder.endsWith(",")) {
+      return {
+        kind: "error",
+        error: makeInputError({
+          lineNumber,
+          raw,
+          original: originalId,
+          normalizedId,
+          message: "Quantity must be a whole number from 1 through 99."
+        })
+      };
+    }
+    const tokens = remainder.split(/[\s,]+/u).filter(Boolean);
+    const tokenError = (message) => ({
+      kind: "error",
+      error: makeInputError({ lineNumber, raw, original: originalId, normalizedId, message })
+    });
+    if (tokens.length > 3) {
+      return tokenError("Unexpected extra tokens on line.");
+    }
+    let quantity = 1;
+    let condition = null;
+    let rarity = null;
+    let rest = tokens;
+    if (INTEGER_PATTERN.test(rest[0])) {
+      const parsedQty = Number(rest[0]);
+      if (!Number.isSafeInteger(parsedQty) || parsedQty < 1 || parsedQty > 99) {
+        return tokenError("Quantity must be a whole number from 1 through 99.");
+      }
+      quantity = parsedQty;
+      rest = rest.slice(1);
+    }
+    for (const token of rest) {
+      const parsedCondition = parseConditionToken(token);
+      if (parsedCondition && !condition) {
+        condition = parsedCondition;
+        continue;
+      }
+      const parsedRarity = parseRarityToken(token);
+      if (parsedRarity && !rarity) {
+        rarity = parsedRarity;
+        continue;
+      }
+      return tokenError(
+        token === tokens[0] ? "Quantity must be a whole number from 1 through 99." : "Expected a condition ('damaged'/1 or 'normal'/0) or a rarity such as RR or S-RR."
+      );
+    }
+    const request = { originalId, normalizedId, quantity, lineNumber };
+    if (condition) {
+      request.condition = condition;
+    }
+    if (rarity) {
+      request.rarity = rarity;
+    }
+    return {
+      kind: "request",
+      request
+    };
+  }
+  function parseInput(input) {
+    if (typeof input !== "string") {
+      throw new TypeError("Input must be a string.");
+    }
+    const requestsById = /* @__PURE__ */ new Map();
+    const errors = [];
+    input.split(/\r?\n/u).forEach((raw, index) => {
+      const lineNumber = index + 1;
+      const parsed = parseLine(raw, lineNumber);
+      if (parsed.kind === "ignored") {
+        return;
+      }
+      if (parsed.kind === "error") {
+        errors.push(parsed.error);
+        return;
+      }
+      const { originalId, normalizedId, quantity, condition, rarity, lineNumber: sourceLine } = parsed.request;
+      const key = `${normalizedId}:${condition ?? ""}:${rarity ?? ""}`;
+      const existing = requestsById.get(key);
+      if (existing) {
+        existing.originalIds.push(originalId);
+        existing.sourceLines.push(sourceLine);
+        existing.requestedQuantity += quantity;
+        return;
+      }
+      const item = {
+        originalIds: [originalId],
+        normalizedId,
+        requestedQuantity: quantity,
+        sourceLines: [sourceLine]
+      };
+      if (condition) {
+        item.condition = condition;
+      }
+      if (rarity) {
+        item.rarity = rarity;
+      }
+      requestsById.set(key, item);
+    });
+    for (const [key, request] of requestsById) {
+      if (request.requestedQuantity <= 99) {
+        continue;
+      }
+      errors.push(
+        makeInputError({
+          lineNumber: request.sourceLines[0],
+          lineNumbers: [...request.sourceLines],
+          raw: request.originalIds.join(", "),
+          original: request.originalIds[0],
+          normalizedId: request.normalizedId,
+          message: `Combined quantity for ${request.originalIds[0]} exceeds the maximum of 99.`
+        })
+      );
+      requestsById.delete(key);
+    }
+    errors.sort((left, right) => left.lineNumber - right.lineNumber);
+    return {
+      requests: [...requestsById.values()],
+      errors
     };
   }
 
@@ -686,7 +668,7 @@
   }
   function makeRequest(value, index) {
     const printedId = requestId(value);
-    const normalizedId = normalizePrintedId2(
+    const normalizedId = normalizePrintedId(
       value && typeof value === "object" && value.normalizedId ? value.normalizedId : printedId
     );
     const rawQuantity = requestQuantity(value);
@@ -757,7 +739,7 @@
     for (const value of values) {
       const prefix = getSearchPrefix(value);
       if (!prefix) continue;
-      const canonical = normalizePrintedId2(prefix);
+      const canonical = normalizePrintedId(prefix);
       const key = canonicalKeys.get(canonical) ?? prefix;
       canonicalKeys.set(canonical, key);
       if (!groups.has(key)) groups.set(key, []);
@@ -889,7 +871,6 @@
     if (Array.isArray(parsed)) {
       return {
         products: parsed,
-        candidates: parsed,
         rejected: [],
         cardProductCount: parsed.length,
         structureError: false,
@@ -902,7 +883,7 @@
     const byId = /* @__PURE__ */ new Map();
     for (const product of products ?? []) {
       const printedId = product?.printedId;
-      const normalizedId = product?.normalizedId ?? normalizePrintedId2(printedId);
+      const normalizedId = product?.normalizedId ?? normalizePrintedId(printedId);
       if (!normalizedId || !normalizedIds.has(normalizedId)) continue;
       if (!byId.has(normalizedId)) byId.set(normalizedId, []);
       byId.get(normalizedId).push(product);
@@ -931,7 +912,7 @@
     return {
       ...request,
       status: "invalid",
-      reason: "INPUT_INVALID",
+      reason: ERROR_CODES.INPUT_INVALID,
       canonicalPrintedId: null,
       product: null,
       name: "",
@@ -942,7 +923,7 @@
       condition: request.condition ?? null
     };
   }
-  function makeMissingRow(request, reason = "PRODUCT_MISSING") {
+  function makeMissingRow(request, reason = ERROR_CODES.PRODUCT_MISSING) {
     return {
       ...request,
       status: "missing",
@@ -962,7 +943,7 @@
     return {
       ...request,
       status: "ambiguous",
-      reason: "PRODUCT_AMBIGUOUS",
+      reason: ERROR_CODES.PRODUCT_AMBIGUOUS,
       canonicalPrintedId: null,
       product: null,
       name: "",
@@ -980,7 +961,7 @@
     return {
       ...request,
       status,
-      reason: status === "ready" ? null : status === "partial" ? "PRODUCT_PARTIAL_STOCK" : "PRODUCT_SOLD_OUT",
+      reason: status === "ready" ? null : status === "partial" ? ERROR_CODES.PRODUCT_PARTIAL_STOCK : ERROR_CODES.PRODUCT_SOLD_OUT,
       canonicalPrintedId: product.printedId,
       rarity: product.rarity ?? null,
       condition: product.condition || (product.kizu === "0" ? "normal" : "damaged"),
@@ -1009,7 +990,7 @@
     return {
       ...row,
       status: row.status === "sold-out" ? "sold-out" : "option",
-      reason: row.status === "sold-out" ? "PRODUCT_SOLD_OUT" : reason,
+      reason: row.status === "sold-out" ? ERROR_CODES.PRODUCT_SOLD_OUT : reason,
       plannedQuantity: 0,
       selected: false,
       isOption: true
@@ -1046,7 +1027,7 @@
     }
     if (request.rarity) {
       const matching = exact.filter((c) => normalizeRarity(c.rarity) === request.rarity);
-      if (matching.length === 0) return [makeMissingRow(request, "PRODUCT_RARITY_MISSING")];
+      if (matching.length === 0) return [makeMissingRow(request, ERROR_CODES.PRODUCT_RARITY_MISSING)];
       return makeConditionRows(request, matching, options);
     }
     const groups = groupByRarity(exact);
@@ -1057,7 +1038,7 @@
     const rarities = groups.map((group) => group.rarity);
     return rowsByGroup.flatMap(
       (rows, index) => rows.filter((row) => index === primaryIndex || row.status !== "missing").map((row) => ({
-        ...index === primaryIndex ? row : asOption(row, "PRODUCT_OTHER_RARITY"),
+        ...index === primaryIndex ? row : asOption(row, ERROR_CODES.PRODUCT_OTHER_RARITY),
         otherRarities: rarities.filter((rarity) => rarity !== groups[index].rarity)
       }))
     );
@@ -1070,10 +1051,10 @@
     if (strict) {
       const [wanted, other] = strict === "normal" ? [normal, damaged] : [damaged, normal];
       if (wanted.length > 1) return [makeAmbiguousRow(request, wanted)];
-      const primary = wanted.length ? makeSingleRow(request, wanted[0], request.requestedQuantity) : { ...makeMissingRow(request, "PRODUCT_CONDITION_MISSING"), condition: strict };
+      const primary = wanted.length ? makeSingleRow(request, wanted[0], request.requestedQuantity) : { ...makeMissingRow(request, ERROR_CODES.PRODUCT_CONDITION_MISSING), condition: strict };
       if (other.length !== 1) return [primary];
       const otherRow = buildRow(request, other[0], 0, numbersForProduct(other[0]).stock);
-      return [primary, asOption(otherRow, "PRODUCT_OTHER_CONDITION")];
+      return [primary, asOption(otherRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
     }
     if (normal.length > 1 || damaged.length > 1) {
       return [makeAmbiguousRow(request, exact)];
@@ -1098,7 +1079,7 @@
         damagedRow.selected = damagedPlanned > 0;
         const normalRow = buildRow(request, normal[0], normalPlanned, normalStock, normalStatus);
         normalRow.selected = normalPlanned > 0;
-        return [damagedRow, normalPlanned > 0 ? normalRow : asOption(normalRow, "PRODUCT_OTHER_CONDITION")];
+        return [damagedRow, normalPlanned > 0 ? normalRow : asOption(normalRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
       } else {
         const normalPlanned = Math.min(totalRequested, normalStock);
         const damagedPlanned = Math.min(Math.max(0, totalRequested - normalPlanned), damagedStock);
@@ -1109,17 +1090,24 @@
         normalRow.selected = normalPlanned > 0;
         const damagedRow = buildRow(request, damaged[0], damagedPlanned, damagedStock, damagedStatus);
         damagedRow.selected = damagedPlanned > 0;
-        return [normalRow, damagedPlanned > 0 ? damagedRow : asOption(damagedRow, "PRODUCT_OTHER_CONDITION")];
+        return [normalRow, damagedPlanned > 0 ? damagedRow : asOption(damagedRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
       }
     }
     return [makeMissingRow(request)];
+  }
+  function notifyProgress(options, progress) {
+    if (typeof options.onProgress !== "function") return;
+    try {
+      options.onProgress(progress);
+    } catch {
+    }
   }
   async function delayBetweenQueries(options, queryNumber) {
     const delay = Number.isFinite(options.delayMs) ? Math.max(0, options.delayMs) : 250;
     if (queryNumber > 0) await sleep(delay, options);
   }
   function queryExpectedIds(values) {
-    return new Set(values.map((value) => normalizePrintedId2(requestId(value))).filter(Boolean));
+    return new Set(values.map((value) => normalizePrintedId(requestId(value))).filter(Boolean));
   }
   function assertStructure(parsed, query, expectedIds) {
     if (!parsed?.structureError) return;
@@ -1150,9 +1138,12 @@
       if (!grouped.has(request)) fallbackIds.push(request);
     }
     let queryNumber = 0;
+    let groupIndex = 0;
     for (const [prefix, values] of groups) {
       await delayBetweenQueries(options, queryNumber);
       queryNumber += 1;
+      notifyProgress(options, { type: "prefix", query: prefix, index: groupIndex, total: groups.size });
+      groupIndex += 1;
       const page = await fetchSearchPage(prefix, options);
       const parsed = parserReport(page.html, { ...options, expectedIds: queryExpectedIds(values) });
       assertStructure(parsed, prefix, queryExpectedIds(values));
@@ -1177,9 +1168,15 @@
       fallbackSeen.add(request.normalizedId);
       exactFallbacks.push(request);
     }
-    for (const request of exactFallbacks) {
+    for (const [fallbackIndex, request] of exactFallbacks.entries()) {
       await delayBetweenQueries(options, queryNumber);
       queryNumber += 1;
+      notifyProgress(options, {
+        type: "exact",
+        query: request.originalId,
+        index: fallbackIndex,
+        total: exactFallbacks.length
+      });
       const page = await fetchSearchPage(request.originalId, options);
       const parsed = parserReport(page.html, { ...options, expectedIds: /* @__PURE__ */ new Set([request.normalizedId]) });
       assertStructure(parsed, request.originalId, /* @__PURE__ */ new Set([request.normalizedId]));
@@ -1201,8 +1198,6 @@
     );
     return {
       rows,
-      items: rows,
-      results: rows,
       requests: normalizedRequests,
       queries,
       candidatesById
@@ -1216,11 +1211,10 @@
   var CSRF_FALLBACK_ENDPOINT = "/top/ws";
   var CART_SUCCESS_STATUS = "SUCCESS";
   var MAX_REPORT_MESSAGE_LENGTH = 180;
-  var CartError = class extends Error {
+  var CartError = class extends YytError {
     constructor(code, message, details = {}) {
-      super(message);
+      super(code, message);
       this.name = "CartError";
-      this.code = code;
       this.responseStatus = details.responseStatus ?? null;
       this.stopBatch = details.stopBatch ?? true;
       if (details.cause !== void 0) {
@@ -1611,7 +1605,7 @@
     if (available === 0 || product.soldOut === true || product.available === false) {
       throw new CartError(
         CART_ERROR_CODES.PRODUCT_SOLD_OUT,
-        "This product is no longer available in normal condition."
+        `This product is no longer available in ${String(product.kizu ?? "0") === "0" ? "normal" : "damaged"} condition.`
       );
     }
     return available == null ? requested : Math.min(requested, available, 99);
@@ -1725,6 +1719,171 @@
     }
     return parseCartResponse(response, item, request.quantity);
   }
+  function isCancelled(options) {
+    if (options.signal?.aborted) {
+      return true;
+    }
+    if (typeof options.isCancelled === "function") {
+      try {
+        return Boolean(options.isCancelled());
+      } catch {
+        return false;
+      }
+    }
+    if (typeof options.cancelled === "function") {
+      try {
+        return Boolean(options.cancelled());
+      } catch {
+        return false;
+      }
+    }
+    return Boolean(options.cancelled);
+  }
+  function skippedAfterStop(item, code, message) {
+    return skippedResult(item, code ?? CART_ERROR_CODES.CART_REJECTED, message);
+  }
+  function itemProduct(item) {
+    return item?.product ?? item;
+  }
+  function itemQuantity(item) {
+    const product = itemProduct(item);
+    return item?.plannedQuantity ?? product?.plannedQuantity ?? item?.requestedQuantity ?? product?.requestedQuantity;
+  }
+  function notifyProgress2(callback, value) {
+    if (typeof callback !== "function") {
+      return;
+    }
+    try {
+      callback(value);
+    } catch {
+    }
+  }
+  async function addCartItems(items, options = {}) {
+    options = options ?? {};
+    const list = Array.from(items ?? []);
+    const results = [];
+    if (list.length === 0) {
+      return {
+        results,
+        stopped: false,
+        cancelled: false,
+        stopCode: null,
+        stopMessage: null,
+        processedCount: 0,
+        successfulCount: 0
+      };
+    }
+    if (isCancelled(options)) {
+      const stopCode2 = CART_ERROR_CODES.CANCELLED;
+      const stopMessage2 = "Cancelled before the CSRF token was loaded.";
+      for (const item of list) {
+        results.push(skippedAfterStop(item, stopCode2, stopMessage2));
+      }
+      return {
+        results,
+        stopped: true,
+        cancelled: true,
+        stopCode: stopCode2,
+        stopMessage: stopMessage2,
+        processedCount: 0,
+        successfulCount: 0
+      };
+    }
+    let csrfToken = cleanToken(options.csrfToken ?? options.token);
+    if (!csrfToken) {
+      try {
+        csrfToken = await getCsrfToken(options);
+      } catch (error) {
+        const code = error?.code ?? CART_ERROR_CODES.CSRF_MISSING;
+        const message = error?.message ?? "A CSRF token could not be obtained.";
+        for (const item of list) {
+          results.push(skippedAfterStop(item, code, message));
+        }
+        return {
+          results,
+          stopped: true,
+          cancelled: false,
+          stopCode: code,
+          stopMessage: message,
+          processedCount: 0,
+          successfulCount: 0
+        };
+      }
+    }
+    const delayMs = options.delayMs ?? DEFAULT_CART_DELAY_MS;
+    const sleep2 = options.sleep ?? options.delay ?? ((milliseconds) => new Promise((resolve) => {
+      setTimeout(resolve, milliseconds);
+    }));
+    let stopped = false;
+    let cancelled = false;
+    let stopCode = null;
+    let stopMessage = null;
+    let successfulCount = 0;
+    for (let index = 0; index < list.length; index += 1) {
+      const item = list[index];
+      if (isCancelled(options)) {
+        cancelled = true;
+        stopped = true;
+        stopCode = CART_ERROR_CODES.CANCELLED;
+        stopMessage = "Cancelled before the next cart request.";
+        for (let remaining = index; remaining < list.length; remaining += 1) {
+          results.push(skippedAfterStop(list[remaining], stopCode, stopMessage));
+        }
+        break;
+      }
+      const quantity = itemQuantity(item);
+      const result = await addCartItem(item, quantity, {
+        ...options,
+        csrfToken
+      });
+      results.push(result);
+      notifyProgress2(options.onProgress, {
+        index,
+        total: list.length,
+        item,
+        result,
+        completedCount: index + 1
+      });
+      if (result.outcome === "success") {
+        successfulCount += 1;
+        if (index < list.length - 1 && !isCancelled(options) && delayMs > 0) {
+          try {
+            await sleep2(delayMs);
+          } catch {
+          }
+        }
+        continue;
+      }
+      if (result.outcome === "skipped" && result.code === CART_ERROR_CODES.CANCELLED) {
+        cancelled = true;
+        stopped = true;
+        stopCode = result.code;
+        stopMessage = result.message;
+        for (let remaining = index + 1; remaining < list.length; remaining += 1) {
+          results.push(skippedAfterStop(list[remaining], stopCode, stopMessage));
+        }
+        break;
+      }
+      if (result.outcome === "unknown" || result.stopBatch) {
+        stopped = true;
+        stopCode = result.code ?? CART_ERROR_CODES.CART_OUTCOME_UNKNOWN;
+        stopMessage = result.message;
+        for (let remaining = index + 1; remaining < list.length; remaining += 1) {
+          results.push(skippedAfterStop(list[remaining], stopCode, "Not attempted because the batch was stopped after the previous cart result."));
+        }
+        break;
+      }
+    }
+    return {
+      results,
+      stopped,
+      cancelled,
+      stopCode,
+      stopMessage,
+      processedCount: results.filter((result) => result.outcome !== "skipped").length,
+      successfulCount
+    };
+  }
 
   // src/ui/styles.js
   var styles = `
@@ -1799,16 +1958,16 @@ a { color: #175cd3; }
     const also = row.otherRarities?.length ? ` (also sold as ${row.otherRarities.join(", ")})` : "";
     const messages = {
       ready: `Ready${also}`,
-      option: row.reason === "PRODUCT_OTHER_CONDITION" ? `${cond === "damaged" ? "Damaged" : "Normal"} copy; set a quantity to add` : `Same ID in another rarity${also}; set a quantity to add`,
+      option: row.reason === ERROR_CODES.PRODUCT_OTHER_CONDITION ? `${cond === "damaged" ? "Damaged" : "Normal"} copy; set a quantity to add` : `Same ID in another rarity${also}; set a quantity to add`,
       partial: `Requested ${row.requestedQuantity}; adding ${row.plannedQuantity}`,
       "sold-out": `Card is sold out in ${cond} condition`,
-      missing: row.reason === "PRODUCT_RARITY_MISSING" ? `No ${row.rarity} product for this ID` : row.reason === "PRODUCT_CONDITION_MISSING" ? `No ${cond} copy for this ID` : "No exact card found",
+      missing: row.reason === ERROR_CODES.PRODUCT_RARITY_MISSING ? `No ${row.rarity} product for this ID` : row.reason === ERROR_CODES.PRODUCT_CONDITION_MISSING ? `No ${cond} copy for this ID` : "No exact card found",
       ambiguous: "Multiple exact products found; skipped",
       invalid: row.reason || "Invalid input"
     };
     return messages[row.status] || row.reason || row.status;
   }
-  function mountApp({ parse, resolve, getCsrfToken: getCsrfToken2, addItem, mutationDelayMs = 750 }) {
+  function mountApp({ parse, resolve, addItems }) {
     const host = document.createElement("div");
     host.id = "yyt-cart-adder-host";
     document.documentElement.append(host);
@@ -1828,12 +1987,13 @@ a { color: #175cd3; }
     root.append(launcher, backdrop);
     let previousFocus = null;
     let lookupController = null;
-    let addController = null;
     let cancelRequested = false;
     let adding = false;
+    let requestCancel = null;
+    let resultsUnseen = false;
     const setView = (...nodes) => body.replaceChildren(el("div", { className: "view" }, ...nodes));
     const close = () => {
-      if (adding && !cancelRequested) cancelRequested = true;
+      if (adding) requestCancel?.();
       lookupController?.abort();
       backdrop.hidden = true;
       previousFocus?.focus?.();
@@ -1841,7 +2001,8 @@ a { color: #175cd3; }
     const open = () => {
       previousFocus = document.activeElement;
       backdrop.hidden = false;
-      showInput();
+      if (!adding && !resultsUnseen) showInput();
+      resultsUnseen = false;
     };
     launcher.addEventListener("click", open);
     closeButton.addEventListener("click", close);
@@ -1851,7 +2012,7 @@ a { color: #175cd3; }
     root.addEventListener("keydown", (event) => {
       if (event.key === "Escape") close();
       if (event.key === "Tab" && !backdrop.hidden) {
-        const focusable = [...panel.querySelectorAll("button:not(:disabled), textarea, input:not(:disabled), a[href]")];
+        const focusable = [...panel.querySelectorAll("button:not(:disabled), textarea, select:not(:disabled), input:not(:disabled), a[href]")];
         if (!focusable.length) return;
         const first = focusable[0];
         const last = focusable.at(-1);
@@ -1865,8 +2026,6 @@ a { color: #175cd3; }
       }
     });
     function showInput(saved = "", savedPref = "prefer-normal") {
-      adding = false;
-      cancelRequested = false;
       const input = el("textarea", { id: "yyt-card-list", placeholder: "Kka/W102-005SEC 1\nKka/W102-006 2 damaged\nRZ/SE35-01 1 S-RR" });
       input.value = saved;
       const prefSelect = el(
@@ -1890,7 +2049,7 @@ a { color: #175cd3; }
           return;
         }
         if (!parsed.requests.length) {
-          const errList = parsed.invalid || parsed.errors || [];
+          const errList = parsed.errors;
           errorBox.hidden = false;
           errorBox.textContent = errList.length ? errList.map((x) => `Line ${x.lineNumber}: ${x.reason || x.message}`).join("\n") : "Enter at least one card ID.";
           return;
@@ -1919,11 +2078,11 @@ a { color: #175cd3; }
         const rows = await resolve(parsed.requests, {
           signal: lookupController.signal,
           conditionPreference,
-          onProgress: (text) => {
-            message.textContent = text;
+          onProgress: ({ type, query, index, total }) => {
+            message.textContent = type === "exact" ? `Searching individually for ${query} (${index + 1} of ${total})\u2026` : `Searching ${query} (${index + 1} of ${total})\u2026`;
           }
         });
-        const invalidRows = (parsed.invalid || parsed.errors || []).map((item) => ({
+        const invalidRows = parsed.errors.map((item) => ({
           ...item,
           status: "invalid",
           requestedId: item.original || "\u2014",
@@ -1959,7 +2118,7 @@ a { color: #175cd3; }
         const normalCards = chosen.filter((r) => r.condition !== "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
         const damagedCards = chosen.filter((r) => r.condition === "damaged").reduce((n, r) => n + r.plannedQuantity, 0);
         const total = chosen.reduce((n, r) => n + (r.priceYen || 0) * r.plannedQuantity, 0);
-        const productCount = new Set(chosen.map((r) => r.product ? [r.product.ver, r.product.cid, r.product.kizu].join("|") : r)).size;
+        const productCount = new Set(chosen.map((r) => productKey(r.product) ?? r)).size;
         let desc = `${productCount} product${productCount === 1 ? "" : "s"} / ${totalCards} card${totalCards === 1 ? "" : "s"}`;
         if (damagedCards > 0 && normalCards > 0) {
           desc += ` (${normalCards} normal, ${damagedCards} damaged)`;
@@ -1983,7 +2142,7 @@ a { color: #175cd3; }
         }
         const byProduct = /* @__PURE__ */ new Map();
         for (const r of rows) {
-          const key = r.product ? [r.product.ver, r.product.cid, r.product.kizu].join("|") : null;
+          const key = productKey(r.product);
           if (!key) continue;
           if (!byProduct.has(key)) byProduct.set(key, []);
           byProduct.get(key).push(r);
@@ -2105,16 +2264,16 @@ ${overStock.join("\n")}` : ""
     async function runBatch(allRows, chosen, source, conditionPreference) {
       adding = true;
       cancelRequested = false;
-      addController = new AbortController();
-      const results = [];
-      const current = el("p", { text: "Preparing\u2026" });
+      const describe = (row, index) => `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${chosen.length})\u2026`;
+      const current = el("p", { text: describe(chosen[0], 0) });
       const progress = el("progress", { className: "progress", max: chosen.length, value: 0 });
       const cancel = el("button", { className: "danger", type: "button", text: "Cancel before next item" });
-      cancel.addEventListener("click", () => {
+      requestCancel = () => {
         cancelRequested = true;
         cancel.disabled = true;
         current.textContent = "Cancellation requested; finishing the current request\u2026";
-      });
+      };
+      cancel.addEventListener("click", requestCancel);
       setView(
         el("h3", { text: "Adding products one at a time" }),
         current,
@@ -2122,36 +2281,24 @@ ${overStock.join("\n")}` : ""
         el("p", { className: "hint", text: "Cancel affects only products not yet started. It cannot undo additions already completed." }),
         el("div", { className: "actions" }, cancel)
       );
-      let token;
+      let results;
       try {
-        token = await getCsrfToken2({ signal: addController.signal });
+        const batch = await addItems(chosen, {
+          isCancelled: () => cancelRequested,
+          onProgress: ({ completedCount }) => {
+            progress.value = completedCount;
+            if (!cancelRequested && completedCount < chosen.length) {
+              current.textContent = describe(chosen[completedCount], completedCount);
+            }
+          }
+        });
+        results = batch.results.map((result, index) => ({ row: chosen[index], ...result }));
       } catch (error) {
-        adding = false;
-        showResults(allRows, chosen, [{ outcome: "failed", message: error.message || "Could not obtain a CSRF token." }], source, conditionPreference);
-        return;
-      }
-      for (let index = 0; index < chosen.length; index += 1) {
-        const row = chosen[index];
-        if (cancelRequested) {
-          for (const pending of chosen.slice(index)) results.push({ row: pending, outcome: "skipped", message: "Cancelled before request" });
-          break;
-        }
-        current.textContent = `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${chosen.length})\u2026`;
-        let result;
-        try {
-          result = await addItem(row, token, { signal: addController.signal });
-        } catch (error) {
-          result = { outcome: "unknown", message: error.message || "Response was lost; inspect the cart before retrying." };
-        }
-        results.push({ row, ...result });
-        progress.value = index + 1;
-        if (result.stopBatch || result.outcome === "unknown") {
-          for (const pending of chosen.slice(index + 1)) results.push({ row: pending, outcome: "skipped", message: "Batch stopped before request" });
-          break;
-        }
-        if (result.outcome === "success" && index < chosen.length - 1) await new Promise((resolveDelay) => setTimeout(resolveDelay, mutationDelayMs));
+        results = [{ outcome: "unknown", message: error.message || "The batch stopped unexpectedly; inspect the cart before retrying." }];
       }
       adding = false;
+      requestCancel = null;
+      if (backdrop.hidden) resultsUnseen = true;
       showResults(allRows, chosen, results, source, conditionPreference);
     }
     function showResults(allRows, chosen, results, source, conditionPreference) {
@@ -2179,12 +2326,12 @@ ${overStock.join("\n")}` : ""
         const cond = [r.row?.rarity, r.row?.condition].filter(Boolean).map((x) => ` [${x}]`).join("");
         return `${label}: ${r.row?.printedId || r.row?.requestedId || "Batch"}${cond} \u2014 ${r.message || key}`;
       })).join("\n");
-      const copy = el("button", { type: "button", text: "Copy report", onClick: async (event) => {
+      const copy = el("button", { type: "button", text: "Copy report", onClick: async () => {
         try {
           await navigator.clipboard.writeText(report);
-          event.currentTarget.textContent = "Copied";
+          copy.textContent = "Copied";
         } catch {
-          event.currentTarget.textContent = "Copy failed";
+          copy.textContent = "Copy failed";
         }
       } });
       setView(
@@ -2227,17 +2374,17 @@ ${overStock.join("\n")}` : ""
       const resolved = await lookupProducts(requests, {
         signal: options.signal,
         delayMs: 250,
-        conditionPreference: options.conditionPreference
+        conditionPreference: options.conditionPreference,
+        onProgress: options.onProgress
       });
       return resolved.rows.map(uiRow);
     },
-    getCsrfToken,
-    async addItem(row, csrfToken, options = {}) {
-      return addCartItem(row.product, row.plannedQuantity, {
-        csrfToken,
-        signal: options.signal
+    addItems(rows, options = {}) {
+      return addCartItems(rows, {
+        isCancelled: options.isCancelled,
+        onProgress: options.onProgress,
+        delayMs: DEFAULT_CART_DELAY_MS
       });
-    },
-    mutationDelayMs: DEFAULT_CART_DELAY_MS
+    }
   });
 })();
