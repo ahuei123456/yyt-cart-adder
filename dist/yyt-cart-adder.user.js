@@ -1,8 +1,11 @@
 // ==UserScript==
 // @name         YYT Weiss Schwarz Cart Adder
 // @namespace    local.yyt-cart-adder
-// @version      0.1.0
+// @version      0.2.0
 // @description  Resolve Weiss Schwarz card IDs and add reviewed quantities to a YYT cart.
+// @homepageURL  https://github.com/ahuei123456/yyt-cart-adder
+// @updateURL    https://raw.githubusercontent.com/ahuei123456/yyt-cart-adder/master/dist/yyt-cart-adder.user.js
+// @downloadURL  https://raw.githubusercontent.com/ahuei123456/yyt-cart-adder/master/dist/yyt-cart-adder.user.js
 // @match        https://yuyu-tei.jp/*
 // @run-at       document-idle
 // @grant        none
@@ -801,7 +804,20 @@
       await options.sleep(milliseconds);
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, milliseconds));
+    const signal = options.signal;
+    const cancelled = () => new DOMException("The lookup was cancelled", "AbortError");
+    if (signal?.aborted) throw cancelled();
+    await new Promise((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(cancelled());
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      }, milliseconds);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   }
   function isAbortError(error) {
     return error?.name === "AbortError" || error?.code === "ABORT_ERR";
@@ -928,6 +944,23 @@
       ...request,
       status: "missing",
       reason,
+      canonicalPrintedId: null,
+      product: null,
+      name: "",
+      priceYen: null,
+      availableStock: 0,
+      plannedQuantity: 0,
+      selected: false,
+      candidates: [],
+      condition: request.condition ?? null
+    };
+  }
+  function makeErrorRow(request, error) {
+    return {
+      ...request,
+      status: "error",
+      reason: error.code,
+      errorMessage: error.message,
       canonicalPrintedId: null,
       product: null,
       name: "",
@@ -1130,6 +1163,7 @@
     const validRequests = normalizedRequests.filter((request) => !request.invalid);
     const expectedIds = new Set(validRequests.map((request) => request.normalizedId));
     const candidatesById = /* @__PURE__ */ new Map();
+    const failuresById = /* @__PURE__ */ new Map();
     const queries = [];
     const fallbackIds = [];
     const groups = groupIdsByPrefix(validRequests);
@@ -1138,28 +1172,38 @@
       if (!grouped.has(request)) fallbackIds.push(request);
     }
     let queryNumber = 0;
-    let groupIndex = 0;
-    for (const [prefix, values] of groups) {
+    const runQuery = async (type, query, queryIds, progress) => {
       await delayBetweenQueries(options, queryNumber);
       queryNumber += 1;
-      notifyProgress(options, { type: "prefix", query: prefix, index: groupIndex, total: groups.size });
+      notifyProgress(options, { type, query, ...progress });
+      try {
+        const page = await fetchSearchPage(query, options);
+        const parsed = parserReport(page.html, { ...options, expectedIds: queryIds });
+        assertStructure(parsed, query, queryIds);
+        mergeCandidates(candidatesById, matchingProducts(parsed.products, expectedIds));
+        queries.push({
+          type,
+          query,
+          url: page.url,
+          status: page.status,
+          cardProductCount: parsed.cardProductCount,
+          productCount: parsed.products.length
+        });
+      } catch (error) {
+        if (options.signal?.aborted || !(error instanceof LookupError)) throw error;
+        for (const id of queryIds) failuresById.set(id, error);
+        queries.push({ type, query, url: error.url ?? null, status: error.status ?? null, error: error.code });
+      }
+    };
+    let groupIndex = 0;
+    for (const [prefix, values] of groups) {
+      await runQuery("prefix", prefix, queryExpectedIds(values), { index: groupIndex, total: groups.size });
       groupIndex += 1;
-      const page = await fetchSearchPage(prefix, options);
-      const parsed = parserReport(page.html, { ...options, expectedIds: queryExpectedIds(values) });
-      assertStructure(parsed, prefix, queryExpectedIds(values));
-      const matches = matchingProducts(parsed.products, expectedIds);
-      mergeCandidates(candidatesById, matches);
-      queries.push({
-        type: "prefix",
-        query: prefix,
-        url: page.url,
-        status: page.status,
-        cardProductCount: parsed.cardProductCount,
-        productCount: parsed.products.length
-      });
     }
     for (const request of validRequests) {
-      if (!candidatesById.has(request.normalizedId)) fallbackIds.push(request);
+      if (!candidatesById.has(request.normalizedId) && !failuresById.has(request.normalizedId)) {
+        fallbackIds.push(request);
+      }
     }
     const exactFallbacks = [];
     const fallbackSeen = /* @__PURE__ */ new Set();
@@ -1169,32 +1213,16 @@
       exactFallbacks.push(request);
     }
     for (const [fallbackIndex, request] of exactFallbacks.entries()) {
-      await delayBetweenQueries(options, queryNumber);
-      queryNumber += 1;
-      notifyProgress(options, {
-        type: "exact",
-        query: request.originalId,
+      await runQuery("exact", request.originalId, /* @__PURE__ */ new Set([request.normalizedId]), {
         index: fallbackIndex,
         total: exactFallbacks.length
       });
-      const page = await fetchSearchPage(request.originalId, options);
-      const parsed = parserReport(page.html, { ...options, expectedIds: /* @__PURE__ */ new Set([request.normalizedId]) });
-      assertStructure(parsed, request.originalId, /* @__PURE__ */ new Set([request.normalizedId]));
-      const matches = matchingProducts(parsed.products, expectedIds);
-      mergeCandidates(candidatesById, matches);
-      queries.push({
-        type: "exact",
-        query: request.originalId,
-        url: page.url,
-        status: page.status,
-        cardProductCount: parsed.cardProductCount,
-        productCount: parsed.products.length
-      });
     }
     const rows = dropDuplicateOptions(
-      normalizedRequests.flatMap(
-        (request) => makeRows(request, candidatesById.get(request.normalizedId), options)
-      )
+      normalizedRequests.flatMap((request) => {
+        const failure = request.invalid || candidatesById.has(request.normalizedId) ? null : failuresById.get(request.normalizedId);
+        return failure ? [makeErrorRow(request, failure)] : makeRows(request, candidatesById.get(request.normalizedId), options);
+      })
     );
     return {
       rows,
@@ -1720,7 +1748,7 @@
     return parseCartResponse(response, item, request.quantity);
   }
   function isCancelled(options) {
-    if (options.signal?.aborted) {
+    if (options.signal?.aborted || options.cancelSignal?.aborted) {
       return true;
     }
     if (typeof options.isCancelled === "function") {
@@ -1757,6 +1785,21 @@
       callback(value);
     } catch {
     }
+  }
+  function waitUnlessCancelled(milliseconds, cancelSignal) {
+    return new Promise((resolve) => {
+      if (cancelSignal?.aborted) {
+        resolve();
+        return;
+      }
+      const done = () => {
+        clearTimeout(timer);
+        cancelSignal?.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, milliseconds);
+      cancelSignal?.addEventListener("abort", done, { once: true });
+    });
   }
   async function addCartItems(items, options = {}) {
     options = options ?? {};
@@ -1811,9 +1854,7 @@
       }
     }
     const delayMs = options.delayMs ?? DEFAULT_CART_DELAY_MS;
-    const sleep2 = options.sleep ?? options.delay ?? ((milliseconds) => new Promise((resolve) => {
-      setTimeout(resolve, milliseconds);
-    }));
+    const sleep2 = options.sleep ?? options.delay ?? ((milliseconds) => waitUnlessCancelled(milliseconds, options.cancelSignal));
     let stopped = false;
     let cancelled = false;
     let stopCode = null;
@@ -1963,6 +2004,7 @@ a { color: #175cd3; }
       "sold-out": `Card is sold out in ${cond} condition`,
       missing: row.reason === ERROR_CODES.PRODUCT_RARITY_MISSING ? `No ${row.rarity} product for this ID` : row.reason === ERROR_CODES.PRODUCT_CONDITION_MISSING ? `No ${cond} copy for this ID` : "No exact card found",
       ambiguous: "Multiple exact products found; skipped",
+      error: row.reason === ERROR_CODES.LOOKUP_SITE_CHANGED ? "YYT's search page could not be read; skipped" : `Search failed (${row.errorMessage || row.reason}); skipped`,
       invalid: row.reason || "Invalid input"
     };
     return messages[row.status] || row.reason || row.status;
@@ -1987,7 +2029,6 @@ a { color: #175cd3; }
     root.append(launcher, backdrop);
     let previousFocus = null;
     let lookupController = null;
-    let cancelRequested = false;
     let adding = false;
     let requestCancel = null;
     let resultsUnseen = false;
@@ -2263,13 +2304,13 @@ ${overStock.join("\n")}` : ""
     }
     async function runBatch(allRows, chosen, source, conditionPreference) {
       adding = true;
-      cancelRequested = false;
+      const cancelController = new AbortController();
       const describe = (row, index) => `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${chosen.length})\u2026`;
       const current = el("p", { text: describe(chosen[0], 0) });
       const progress = el("progress", { className: "progress", max: chosen.length, value: 0 });
       const cancel = el("button", { className: "danger", type: "button", text: "Cancel before next item" });
       requestCancel = () => {
-        cancelRequested = true;
+        cancelController.abort();
         cancel.disabled = true;
         current.textContent = "Cancellation requested; finishing the current request\u2026";
       };
@@ -2284,10 +2325,10 @@ ${overStock.join("\n")}` : ""
       let results;
       try {
         const batch = await addItems(chosen, {
-          isCancelled: () => cancelRequested,
+          cancelSignal: cancelController.signal,
           onProgress: ({ completedCount }) => {
             progress.value = completedCount;
-            if (!cancelRequested && completedCount < chosen.length) {
+            if (!cancelController.signal.aborted && completedCount < chosen.length) {
               current.textContent = describe(chosen[completedCount], completedCount);
             }
           }
@@ -2349,7 +2390,7 @@ ${overStock.join("\n")}` : ""
         )
       );
     }
-    return { open, close };
+    return { open, close, root };
   }
 
   // src/main.js
@@ -2381,7 +2422,7 @@ ${overStock.join("\n")}` : ""
     },
     addItems(rows, options = {}) {
       return addCartItems(rows, {
-        isCancelled: options.isCancelled,
+        cancelSignal: options.cancelSignal,
         onProgress: options.onProgress,
         delayMs: DEFAULT_CART_DELAY_MS
       });

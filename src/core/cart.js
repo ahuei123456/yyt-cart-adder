@@ -662,7 +662,7 @@ export async function addCartItem(productOrItem, plannedQuantity, options = {}) 
 }
 
 function isCancelled(options) {
-  if (options.signal?.aborted) {
+  if (options.signal?.aborted || options.cancelSignal?.aborted) {
     return true;
   }
   if (typeof options.isCancelled === "function") {
@@ -708,12 +708,36 @@ function notifyProgress(callback, value) {
 }
 
 /**
+ * Resolve after `milliseconds`, or as soon as `cancelSignal` aborts.
+ */
+function waitUnlessCancelled(milliseconds, cancelSignal) {
+  return new Promise((resolve) => {
+    if (cancelSignal?.aborted) {
+      resolve();
+      return;
+    }
+    const done = () => {
+      clearTimeout(timer);
+      cancelSignal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, milliseconds);
+    cancelSignal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+/**
  * Add resolved products strictly one at a time.
  *
  * `results` contains one entry for every supplied item, including items that
  * were not attempted because of cancellation, a CSRF/setup failure, or a
  * previous broad failure.  Once a POST is dispatched, its result is never
  * replayed automatically.
+ *
+ * `cancelSignal` stops the batch before the next item and cuts the delay
+ * between items short.  Unlike `signal`, it is never passed to fetch, so
+ * cancelling cannot abort a POST that is already in flight and leave its
+ * outcome unknown.
  */
 export async function addCartItems(items, options = {}) {
   options = options ?? {};
@@ -771,9 +795,8 @@ export async function addCartItems(items, options = {}) {
   }
 
   const delayMs = options.delayMs ?? DEFAULT_CART_DELAY_MS;
-  const sleep = options.sleep ?? options.delay ?? ((milliseconds) => new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  }));
+  const sleep = options.sleep ?? options.delay ??
+    ((milliseconds) => waitUnlessCancelled(milliseconds, options.cancelSignal));
   let stopped = false;
   let cancelled = false;
   let stopCode = null;

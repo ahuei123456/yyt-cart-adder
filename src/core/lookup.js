@@ -247,13 +247,30 @@ function isRetryableStatus(status) {
   return status === 429 || status >= 500;
 }
 
+/**
+ * Wait between searches.  Aborting `options.signal` ends the wait at once
+ * with an AbortError, so a cancelled lookup does not sit out its delay.
+ */
 async function sleep(milliseconds, options) {
   if (milliseconds <= 0) return;
   if (typeof options.sleep === "function") {
     await options.sleep(milliseconds);
     return;
   }
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const signal = options.signal;
+  const cancelled = () => new DOMException("The lookup was cancelled", "AbortError");
+  if (signal?.aborted) throw cancelled();
+  await new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(cancelled());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function isAbortError(error) {
@@ -396,6 +413,28 @@ function makeMissingRow(request, reason = ERROR_CODES.PRODUCT_MISSING) {
     ...request,
     status: "missing",
     reason,
+    canonicalPrintedId: null,
+    product: null,
+    name: "",
+    priceYen: null,
+    availableStock: 0,
+    plannedQuantity: 0,
+    selected: false,
+    candidates: [],
+    condition: request.condition ?? null,
+  };
+}
+
+/**
+ * A row whose search failed.  The failure belongs to this ID's search only;
+ * rows resolved by other searches in the same lookup are still usable.
+ */
+function makeErrorRow(request, error) {
+  return {
+    ...request,
+    status: "error",
+    reason: error.code,
+    errorMessage: error.message,
     canonicalPrintedId: null,
     product: null,
     name: "",
@@ -680,12 +719,18 @@ function assertStructure(parsed, query, expectedIds) {
 /**
  * Resolve input IDs using one grouped prefix GET per prefix, then exact GET
  * fallbacks for IDs not returned by their prefix response.
+ *
+ * A search that fails (HTTP, network, or an unreadable page) marks only the
+ * IDs it was for as `error` rows; the rest of the lookup carries on.  IDs whose
+ * prefix search failed are not retried one by one, so a broken site is not
+ * hit with a request per card.  Cancellation still rejects the whole lookup.
  */
 export async function lookupProducts(requests, options = {}) {
   const normalizedRequests = normalizeRequests(requests);
   const validRequests = normalizedRequests.filter((request) => !request.invalid);
   const expectedIds = new Set(validRequests.map((request) => request.normalizedId));
   const candidatesById = new Map();
+  const failuresById = new Map();
   const queries = [];
   const fallbackIds = [];
   const groups = groupIdsByPrefix(validRequests);
@@ -695,29 +740,40 @@ export async function lookupProducts(requests, options = {}) {
   }
 
   let queryNumber = 0;
-  let groupIndex = 0;
-  for (const [prefix, values] of groups) {
+  const runQuery = async (type, query, queryIds, progress) => {
     await delayBetweenQueries(options, queryNumber);
     queryNumber += 1;
-    notifyProgress(options, { type: "prefix", query: prefix, index: groupIndex, total: groups.size });
+    notifyProgress(options, { type, query, ...progress });
+    try {
+      const page = await fetchSearchPage(query, options);
+      const parsed = parserReport(page.html, { ...options, expectedIds: queryIds });
+      assertStructure(parsed, query, queryIds);
+      mergeCandidates(candidatesById, matchingProducts(parsed.products, expectedIds));
+      queries.push({
+        type,
+        query,
+        url: page.url,
+        status: page.status,
+        cardProductCount: parsed.cardProductCount,
+        productCount: parsed.products.length,
+      });
+    } catch (error) {
+      if (options.signal?.aborted || !(error instanceof LookupError)) throw error;
+      for (const id of queryIds) failuresById.set(id, error);
+      queries.push({ type, query, url: error.url ?? null, status: error.status ?? null, error: error.code });
+    }
+  };
+
+  let groupIndex = 0;
+  for (const [prefix, values] of groups) {
+    await runQuery("prefix", prefix, queryExpectedIds(values), { index: groupIndex, total: groups.size });
     groupIndex += 1;
-    const page = await fetchSearchPage(prefix, options);
-    const parsed = parserReport(page.html, { ...options, expectedIds: queryExpectedIds(values) });
-    assertStructure(parsed, prefix, queryExpectedIds(values));
-    const matches = matchingProducts(parsed.products, expectedIds);
-    mergeCandidates(candidatesById, matches);
-    queries.push({
-      type: "prefix",
-      query: prefix,
-      url: page.url,
-      status: page.status,
-      cardProductCount: parsed.cardProductCount,
-      productCount: parsed.products.length,
-    });
   }
 
   for (const request of validRequests) {
-    if (!candidatesById.has(request.normalizedId)) fallbackIds.push(request);
+    if (!candidatesById.has(request.normalizedId) && !failuresById.has(request.normalizedId)) {
+      fallbackIds.push(request);
+    }
   }
 
   // An ID can be absent from both prefix groups and the first fallback pass;
@@ -731,33 +787,23 @@ export async function lookupProducts(requests, options = {}) {
   }
 
   for (const [fallbackIndex, request] of exactFallbacks.entries()) {
-    await delayBetweenQueries(options, queryNumber);
-    queryNumber += 1;
-    notifyProgress(options, {
-      type: "exact",
-      query: request.originalId,
+    await runQuery("exact", request.originalId, new Set([request.normalizedId]), {
       index: fallbackIndex,
       total: exactFallbacks.length,
-    });
-    const page = await fetchSearchPage(request.originalId, options);
-    const parsed = parserReport(page.html, { ...options, expectedIds: new Set([request.normalizedId]) });
-    assertStructure(parsed, request.originalId, new Set([request.normalizedId]));
-    const matches = matchingProducts(parsed.products, expectedIds);
-    mergeCandidates(candidatesById, matches);
-    queries.push({
-      type: "exact",
-      query: request.originalId,
-      url: page.url,
-      status: page.status,
-      cardProductCount: parsed.cardProductCount,
-      productCount: parsed.products.length,
     });
   }
 
   const rows = dropDuplicateOptions(
-    normalizedRequests.flatMap((request) =>
-      makeRows(request, candidatesById.get(request.normalizedId), options),
-    ),
+    normalizedRequests.flatMap((request) => {
+      // Another search can still return this ID's product; only an ID with
+      // no candidates at all is reported as failed.
+      const failure = request.invalid || candidatesById.has(request.normalizedId)
+        ? null
+        : failuresById.get(request.normalizedId);
+      return failure
+        ? [makeErrorRow(request, failure)]
+        : makeRows(request, candidatesById.get(request.normalizedId), options);
+    }),
   );
   return {
     rows,

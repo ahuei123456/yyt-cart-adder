@@ -32,7 +32,7 @@ mountApp({
   },
   addItems(rows, options = {}) {
     return addCartItems(rows, {
-      isCancelled: options.isCancelled,
+      cancelSignal: options.cancelSignal,
       onProgress: options.onProgress,
       delayMs: DEFAULT_CART_DELAY_MS,
     });

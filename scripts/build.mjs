@@ -9,7 +9,10 @@ const metadataPath = resolve(projectRoot, "src/metadata.txt");
 const entryPoint = resolve(projectRoot, "src/main.js");
 const outputPath = resolve(projectRoot, "dist/yyt-cart-adder.user.js");
 
-const metadata = (await readFile(metadataPath, "utf8")).trimEnd();
+// package.json is the single source of the version; Tampermonkey only offers
+// an update when @version increases.
+const { version } = JSON.parse(await readFile(resolve(projectRoot, "package.json"), "utf8"));
+const metadata = (await readFile(metadataPath, "utf8")).trimEnd().replace("{{VERSION}}", version);
 await mkdir(dirname(outputPath), { recursive: true });
 
 await build({

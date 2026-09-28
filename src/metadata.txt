@@ -1,8 +1,11 @@
 // ==UserScript==
 // @name         YYT Weiss Schwarz Cart Adder
 // @namespace    local.yyt-cart-adder
-// @version      0.1.0
+// @version      {{VERSION}}
 // @description  Resolve Weiss Schwarz card IDs and add reviewed quantities to a YYT cart.
+// @homepageURL  https://github.com/ahuei123456/yyt-cart-adder
+// @updateURL    https://raw.githubusercontent.com/ahuei123456/yyt-cart-adder/master/dist/yyt-cart-adder.user.js
+// @downloadURL  https://raw.githubusercontent.com/ahuei123456/yyt-cart-adder/master/dist/yyt-cart-adder.user.js
 // @match        https://yuyu-tei.jp/*
 // @run-at       document-idle
 // @grant        none

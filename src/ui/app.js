@@ -33,6 +33,9 @@ function statusReason(row) {
         ? `No ${cond} copy for this ID`
         : "No exact card found",
     ambiguous: "Multiple exact products found; skipped",
+    error: row.reason === ERROR_CODES.LOOKUP_SITE_CHANGED
+      ? "YYT's search page could not be read; skipped"
+      : `Search failed (${row.errorMessage || row.reason}); skipped`,
     invalid: row.reason || "Invalid input",
   };
   return messages[row.status] || row.reason || row.status;
@@ -56,7 +59,6 @@ export function mountApp({ parse, resolve, addItems }) {
 
   let previousFocus = null;
   let lookupController = null;
-  let cancelRequested = false;
   let adding = false;
   // Set while a batch is running so closing the dialog cancels it the same
   // way the Cancel button does.
@@ -333,14 +335,14 @@ export function mountApp({ parse, resolve, addItems }) {
 
   async function runBatch(allRows, chosen, source, conditionPreference) {
     adding = true;
-    cancelRequested = false;
+    const cancelController = new AbortController();
     const describe = (row, index) =>
       `Adding ${row.printedId}${row.rarity ? ` ${row.rarity}` : ""} (${index + 1} of ${chosen.length})…`;
     const current = el("p", { text: describe(chosen[0], 0) });
     const progress = el("progress", { className: "progress", max: chosen.length, value: 0 });
     const cancel = el("button", { className: "danger", type: "button", text: "Cancel before next item" });
     requestCancel = () => {
-      cancelRequested = true;
+      cancelController.abort();
       cancel.disabled = true;
       current.textContent = "Cancellation requested; finishing the current request…";
     };
@@ -351,10 +353,10 @@ export function mountApp({ parse, resolve, addItems }) {
     let results;
     try {
       const batch = await addItems(chosen, {
-        isCancelled: () => cancelRequested,
+        cancelSignal: cancelController.signal,
         onProgress: ({ completedCount }) => {
           progress.value = completedCount;
-          if (!cancelRequested && completedCount < chosen.length) {
+          if (!cancelController.signal.aborted && completedCount < chosen.length) {
             current.textContent = describe(chosen[completedCount], completedCount);
           }
         },
@@ -408,5 +410,6 @@ export function mountApp({ parse, resolve, addItems }) {
     );
   }
 
-  return { open, close };
+  // `root` is returned for tests; the shadow root is closed to page scripts.
+  return { open, close, root };
 }

@@ -7,7 +7,7 @@ The script is intentionally conservative: it accepts only exact matches, never s
 ## Install
 
 1. Install Tampermonkey in a Chromium-based browser.
-2. Open `dist/yyt-cart-adder.user.js` and install it in Tampermonkey.
+2. Open [the userscript](https://raw.githubusercontent.com/ahuei123456/yyt-cart-adder/master/dist/yyt-cart-adder.user.js) and install it in Tampermonkey. Tampermonkey checks the same URL for updates.
 3. Visit `https://yuyu-tei.jp` and select **Bulk add WS cards**.
 
 No runtime dependencies, external scripts, analytics, or persistent storage are used.
@@ -55,12 +55,15 @@ npm test
 npm run build
 ```
 
-Development dependencies are used only to build the single installable userscript. The committed `dist` file does not require a local build.
+Development dependencies are used only to build the single installable userscript and to run tests (the UI tests use happy-dom). The committed `dist` file does not require a local build.
+
+`dist` is committed because it is the install and update URL. Rebuild it with every source change; CI fails if it is out of date. To release, bump `version` in `package.json` and rebuild. The build writes that version into the userscript header, and Tampermonkey only offers an update when it increases.
 
 ## Safety notes
 
 - Search results and estimated totals reflect current lookup data; inventory is not reserved by placing it in the cart.
-- Additions occur sequentially. Cancel stops before the next product and does not undo prior successes.
+- If one of YYT's searches fails or returns a page the script can't read, only the cards from that search are marked **Search failed** and skipped. Everything else can still be reviewed and added.
+- Additions occur sequentially. Cancel stops before the next product and does not undo prior successes. Closing the dialog while adding also cancels; reopening it shows the progress or the results.
 - A lost/aborted mutation response is reported as an unknown outcome and stops the batch. Inspect the cart before deciding whether to try that item again.
 - The tool ends at `/cart/sell`; checkout, login, payment, delivery, and order submission remain entirely manual.
 

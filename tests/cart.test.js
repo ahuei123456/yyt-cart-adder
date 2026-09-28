@@ -269,6 +269,32 @@ test("batch cancellation skips future items without undoing a success", async ()
   assert.equal(result.results[1].code, CART_ERROR_CODES.CANCELLED);
 });
 
+test("cancelSignal ends the delay between items and is never passed to fetch", async () => {
+  const { calls, fetchImpl } = requestCalls([
+    response(200, '{"status":"SUCCESS"}'),
+    response(200, '{"status":"SUCCESS"}'),
+  ]);
+  const controller = new AbortController();
+  const started = Date.now();
+  const result = await addCartItems([
+    { product: product({ cid: "1" }), plannedQuantity: 1 },
+    { product: product({ cid: "2" }), plannedQuantity: 1 },
+  ], {
+    csrfToken: "csrf",
+    fetchImpl,
+    delayMs: 60_000,
+    cancelSignal: controller.signal,
+    // Cancel while the batch is waiting between the two items.
+    onProgress: () => { setTimeout(() => controller.abort(), 0); },
+  });
+
+  assert.ok(Date.now() - started < 5_000);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.signal, undefined);
+  assert.deepEqual(result.results.map((item) => item.outcome), ["success", "skipped"]);
+  assert.equal(result.results[1].code, CART_ERROR_CODES.CANCELLED);
+});
+
 test("missing CSRF token prevents every cart mutation", async () => {
   const { calls, fetchImpl } = requestCalls([]);
   const result = await addCartItems([

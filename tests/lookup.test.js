@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
-  LookupError,
   buildLookupPlan,
   groupIdsByPrefix,
   getSearchPrefix,
@@ -137,12 +136,46 @@ test("marks sold-out candidates unselectable", async () => {
   assert.equal(result.rows[0].selected, false);
 });
 
-test("stops with a stable site-change error for malformed result markup", async () => {
+test("reports malformed result markup as a site-change error on that search's rows", async () => {
   const mock = fakeFetch({ "Kka/W102": fixture("search-structure-changed.html") });
-  await assert.rejects(
-    lookupProducts(["Kka/W102-005SEC"], { fetch: mock.fetch, delayMs: 0 }),
-    (error) => error instanceof LookupError && error.code === "LOOKUP_SITE_CHANGED",
+  const result = await lookupProducts(["Kka/W102-005SEC"], { fetch: mock.fetch, delayMs: 0 });
+  assert.equal(result.rows[0].status, "error");
+  assert.equal(result.rows[0].reason, "LOOKUP_SITE_CHANGED");
+  assert.equal(result.rows[0].selected, false);
+  // A failed prefix search is not retried card by card.
+  assert.deepEqual(mock.calls, ["Kka/W102"]);
+});
+
+test("a failed search does not discard rows resolved by other searches", async () => {
+  const mock = fakeFetch({
+    "Kka/W102": fixture("search-prefix.html"),
+    "SMP/W99": () => response("server", 503),
+  });
+  const result = await lookupProducts(
+    ["Kka/W102-005SEC", "SMP/W99-001R"],
+    { fetch: mock.fetch, delayMs: 0, maxRetries: 0 },
   );
+  assert.deepEqual(result.rows.map((row) => row.status), ["ready", "error"]);
+  assert.equal(result.rows[1].reason, "LOOKUP_HTTP");
+  assert.match(result.rows[1].errorMessage, /HTTP 503/);
+  assert.equal(result.queries[1].error, "LOOKUP_HTTP");
+});
+
+test("cancelling rejects the lookup and ends the delay between searches", async () => {
+  const controller = new AbortController();
+  const mock = fakeFetch({ "Kka/W102": fixture("search-prefix.html") });
+  const started = Date.now();
+  const lookup = lookupProducts(["Kka/W102-005SEC", "SMP/W99-001R"], {
+    fetch: mock.fetch,
+    delayMs: 60_000,
+    signal: controller.signal,
+    onProgress: ({ index }) => {
+      if (index === 0) setTimeout(() => controller.abort(), 0);
+    },
+  });
+  await assert.rejects(lookup, (error) => error.name === "AbortError");
+  assert.ok(Date.now() - started < 5_000);
+  assert.deepEqual(mock.calls, ["Kka/W102"]);
 });
 
 test("retries transient search failures but does not retry definite client errors", async () => {
@@ -168,14 +201,14 @@ test("retries transient search failures but does not retry definite client error
       return response("bad", 404);
     },
   };
-  await assert.rejects(
-    lookupProducts(["Kka/W102-005SEC"], {
-      fetch: bad.fetch,
-      delayMs: 0,
-      retryBaseMs: 0,
-    }),
-    (error) => error.code === "LOOKUP_HTTP" && error.status === 404,
-  );
+  const failed = await lookupProducts(["Kka/W102-005SEC"], {
+    fetch: bad.fetch,
+    delayMs: 0,
+    retryBaseMs: 0,
+  });
+  assert.equal(failed.rows[0].status, "error");
+  assert.equal(failed.rows[0].reason, "LOOKUP_HTTP");
+  assert.equal(failed.queries[0].status, 404);
   assert.equal(badAttempts, 1);
 });
 
