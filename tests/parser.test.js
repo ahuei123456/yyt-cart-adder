@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   extractPrintedId,
   normalizePrintedId,
+  normalizeRarity,
   parseSearchResults,
 } from "../src/core/parser.js";
 
@@ -40,13 +41,15 @@ test("parses the exact available product fixture", () => {
   });
 });
 
-test("parses damaged products when kizu is non-zero", () => {
-  const report = parseSearchResults(fixture("search-with-damaged.html"));
+test("parses damaged products from YYT's damaged-copy markup", () => {
+  const report = parseSearchResults(fixture("search-damaged-copies.html"));
   assert.equal(report.structureError, false);
-  assert.equal(report.products.length, 2);
-  const damaged = report.products.find((p) => p.condition === "damaged");
-  assert.ok(damaged);
+  assert.deepEqual(report.rejected, []);
+  assert.equal(report.products.length, 1);
+  const [damaged] = report.products;
+  assert.equal(damaged.condition, "damaged");
   assert.equal(damaged.kizu, "1");
+  assert.equal(damaged.rarity, "SEC");
   assert.equal(damaged.priceYen, 10000);
   assert.equal(damaged.stock, 3);
 });
@@ -147,4 +150,36 @@ test("falls back to the Card List heading when the alt has no rarity", () => {
     <h3><span>RR</span> Card List</h3>${card("10001")}
     <h3><span>S-RR</span> Card List</h3>${card("10002")}`;
   assert.deepEqual(parseSearchHtml(html).map((p) => p.rarity), ["RR", "S-RR"]);
+});
+
+test("reads YYT's star, symbol and no-rarity labels", () => {
+  for (const [label, expected] of [
+    ["SR★★★", "SR★★★"],
+    ["SR**", "SR★★"],
+    ["sr☆", "SR★"],
+    ["SR＊＊", "SR★★"],
+    ["M@P", "M@P"],
+    ["Cu", "CU"],
+    ["RRR+", "RRR+"],
+    ["-", "-"],
+    ["LUXO", "LUXO"],
+    ["SR★★★★", null],
+    ["エミリア", null],
+  ]) {
+    assert.equal(normalizeRarity(label), expected, label);
+  }
+  const card = (cid) => `
+    <div class="card-product">
+      <a href="/sell/ws/card/nik/${cid}"><img class="card" alt="NIK/S135-001S カード"></a>
+      <span class="border">NIK/S135-001S</span><h4>カード</h4><strong>980 円</strong>
+      <input class="cart_gid" value="7"><input class="cart_ver" value="nik"><input class="cart_cid" value="${cid}"><input class="cart_kizu" value="0"><input class="cart_limit" value="1"><input class="cart_active" value="1">
+    </div>`;
+  const html = `<h3>SR★★★ Card List</h3>${card("1")}<h3>SR★ Card List</h3>${card("2")}`;
+  assert.deepEqual(parseSearchHtml(html).map((p) => p.rarity), ["SR★★★", "SR★"]);
+});
+
+test("reports the last result page a search links to", () => {
+  const link = (page) => `<a href="https://yuyu-tei.jp/sell/ws/s/search?search_word=HOL&page=${page}">${page}</a>`;
+  assert.equal(parseSearchResults(fixture("search-exact.html")).lastPage, 1);
+  assert.equal(parseSearchResults(fixture("search-exact.html") + link(2) + link(3) + link(2)).lastPage, 3);
 });

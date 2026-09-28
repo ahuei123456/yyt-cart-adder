@@ -246,3 +246,22 @@ test("rejects lowercase or repeated rarity tokens", () => {
   assert.equal(result.requests.length, 0);
   assert.deepEqual(result.errors.map((e) => e.lineNumber), [1, 2]);
 });
+
+test("accepts star rarities with an asterisk alias and full-width input", () => {
+  const { requests, errors } = parseInput([
+    "NIK/S135-001S SR★★★",
+    "NIK/S135-004S 2 SR**",
+    "NIK/S135-004S SR★★",
+    "Ｋｋａ／Ｗ１０２－００５ＳＥＣ　２　ｄａｍａｇｅｄ",
+  ].join("\n"));
+  assert.deepEqual(errors, []);
+  assert.deepEqual(
+    requests.map((r) => [r.normalizedId, r.rarity ?? null, r.condition ?? null, r.requestedQuantity]),
+    [
+      ["nik/s135-001s", "SR★★★", null, 1],
+      ["nik/s135-004s", "SR★★", null, 3],
+      ["kka/w102-005sec", null, "damaged", 2],
+    ],
+  );
+  assert.deepEqual(requests[1].originalIds, ["NIK/S135-004S", "NIK/S135-004S"]);
+});

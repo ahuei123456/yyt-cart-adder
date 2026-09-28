@@ -145,12 +145,17 @@ function readPrintedId(element) {
   return null;
 }
 
-// Rarity labels as YYT prints them: `RR`, `S-RR`, `SP`, `SEC+`, `PR`.
-const RARITY_PATTERN = /^(?:[A-Za-z]{1,2}-)?[A-Za-z]{1,4}\+?$/u;
+// Rarity labels as YYT prints them: `RR`, `S-RR`, `SP`, `SEC+`, `PR`,
+// `SR★★`, `M@P`, and `-` for cards with no rarity.
+const RARITY_PATTERN = /^(?:(?:[A-Z]{1,2}-)?[A-Z@]{1,5}(?:\+|★{1,3})?|-)$/u;
 
+/**
+ * Return a rarity in YYT's spelling, or null for anything else.  `*` and `☆`
+ * stand in for `★`, which most keyboards cannot type: `SR**` is `SR★★`.
+ */
 export function normalizeRarity(value) {
   if (value == null) return null;
-  const text = String(value).trim().toLocaleUpperCase("en-US");
+  const text = String(value).normalize("NFKC").trim().toLocaleUpperCase("en-US").replace(/[*☆]/gu, "★");
   return RARITY_PATTERN.test(text) ? text : null;
 }
 
@@ -311,6 +316,19 @@ function collectCardProducts(document) {
 }
 
 /**
+ * A search shows at most 600 cards per page and links the rest as
+ * `?search_word=…&page=N`.  Return the highest page linked, or 1.
+ */
+function readLastPage(document) {
+  let last = 1;
+  for (const link of queryAll(document, 'a[href*="page="]')) {
+    const match = /[?&]page=(\d+)/u.exec(getAttribute(link, "href") ?? "");
+    if (match) last = Math.max(last, Number(match[1]));
+  }
+  return last;
+}
+
+/**
  * Parse a search response and preserve diagnostics needed by lookup.
  *
  * `structureError` is true when cards are present but all candidates are
@@ -332,6 +350,7 @@ export function parseSearchResults(html) {
   }
 
   const explicitEmpty = looksLikeExplicitEmptyResult(source);
+  const lastPage = readLastPage(document);
   const structureError =
     (cardElements.length > 0 && products.length === 0) ||
     (cardElements.length === 0 && source.trim() !== "" && !explicitEmpty);
@@ -342,6 +361,7 @@ export function parseSearchResults(html) {
     cardProductCount: cardElements.length,
     structureError,
     explicitEmpty,
+    lastPage,
   };
 }
 

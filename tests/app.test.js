@@ -274,3 +274,30 @@ test('merged review rows cannot exceed 99 copies even with enough stock', async 
   quantity.dispatchEvent(new window.Event('input'));
   assert.equal(ui.button('Add ').disabled, false);
 });
+
+test("versions of one ID start at zero and can be chosen", async (t) => {
+  const { window } = withDom(t);
+  const variant = (cid, name) => readyRow({
+    originalId: "GU/W88-006SSP",
+    printedId: "GU/W88-006SSP",
+    rarity: "SSP",
+    name,
+    status: "option",
+    reason: "PRODUCT_VARIANT",
+    variantCount: 2,
+    isOption: true,
+    requestedQuantity: 1,
+    plannedQuantity: 0,
+    selected: false,
+    product: { ver: "gu", cid, kizu: "0" },
+  });
+  const ui = mount(window, { resolve: async () => [variant("1", "Gold foil"), variant("2", "Pink foil")] });
+  ui.open();
+  await ui.resolveInput("GU/W88-006SSP");
+  assert.match(ui.root.textContent, /One of 2 versions of this ID \(see name\); requested 1/);
+  assert.equal(ui.button("Add ").disabled, true);
+  const quantity = ui.root.querySelectorAll(".qty-input")[1];
+  quantity.value = "1";
+  quantity.dispatchEvent(new window.Event("input"));
+  assert.equal(ui.button("Add ").disabled, false);
+});

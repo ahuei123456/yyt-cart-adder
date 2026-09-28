@@ -24,19 +24,40 @@ function response(html, status = 200) {
   };
 }
 
+/**
+ * Routes are keyed by search word; `word [damaged]` answers the kizu=1 search
+ * for damaged copies and `word [page 2]` a later page.  A damaged search with
+ * no route of its own finds nothing.
+ */
+function searchKey(url) {
+  const params = new URL(url).searchParams;
+  return [
+    params.get("search_word"),
+    params.get("kizu") === "1" ? "[damaged]" : null,
+    params.get("page") ? `[page ${params.get("page")}]` : null,
+  ].filter(Boolean).join(" ");
+}
+
 function fakeFetch(routes) {
   const calls = [];
   const fetch = async (url) => {
-    const parsed = new URL(url);
-    const query = parsed.searchParams.get("search_word");
+    const query = searchKey(url);
     calls.push(query);
-    const route = routes[query] ?? routes.default;
+    const route = routes[query] ?? (query.includes("[damaged]") ? undefined : routes.default);
     if (route instanceof Error) throw route;
     if (typeof route === "function") return route(query, calls.length);
     return response(route ?? fixture("search-empty.html"));
   };
   return { fetch, calls };
 }
+
+const isDamagedSearch = (url) => new URL(url).searchParams.get("kizu") === "1";
+
+// Kka/W102-005SEC with 2 normal copies at 12,800 and 3 damaged at 10,000.
+const conditionRoutes = () => ({
+  "Kka/W102": fixture("search-normal-copies.html"),
+  "Kka/W102 [damaged]": fixture("search-damaged-copies.html"),
+});
 
 test("groups shared prefixes into one query and sends unusual IDs to fallback", () => {
   const groups = groupIdsByPrefix([
@@ -73,8 +94,10 @@ test("reports each search as it starts, per phase", async () => {
   );
 
   assert.deepEqual(progress, [
-    { type: "prefix", query: "Kka/W102", index: 0, total: 1 },
-    { type: "exact", query: "unusual-id", index: 0, total: 1 },
+    { type: "prefix", query: "Kka/W102", condition: "normal", index: 0, total: 2 },
+    { type: "prefix", query: "Kka/W102", condition: "damaged", index: 1, total: 2 },
+    { type: "exact", query: "unusual-id", condition: "normal", index: 0, total: 2 },
+    { type: "exact", query: "unusual-id", condition: "damaged", index: 1, total: 2 },
   ]);
 });
 
@@ -88,7 +111,7 @@ test("performs one grouped lookup and returns exact rows", async () => {
     { fetch: mock.fetch, delayMs: 0 },
   );
 
-  assert.deepEqual(mock.calls, ["Kka/W102"]);
+  assert.deepEqual(mock.calls, ["Kka/W102", "Kka/W102 [damaged]"]);
   assert.equal(result.rows.length, 2);
   assert.equal(result.rows[0].status, "ready");
   assert.equal(result.rows[0].plannedQuantity, 1);
@@ -110,19 +133,25 @@ test("falls back to exact search for an ID absent from the prefix page", async (
     { fetch: mock.fetch, delayMs: 0 },
   );
 
-  assert.deepEqual(mock.calls, ["Kka/W102", "Kka/W102-011R"]);
+  // A damaged copy missing from the prefix search is not searched for again.
+  assert.deepEqual(mock.calls, ["Kka/W102", "Kka/W102 [damaged]", "Kka/W102-011R"]);
   assert.equal(result.rows[0].status, "ready");
   assert.equal(result.rows[1].status, "missing");
 });
 
-test("marks duplicate exact candidates ambiguous", async () => {
+test("offers each version of an ID sold as several products at zero", async () => {
   const mock = fakeFetch({ "Kka/W102": fixture("search-ambiguous.html") });
   const result = await lookupProducts(
-    ["Kka/W102-009R"],
+    [{ originalId: "Kka/W102-009R", requestedQuantity: 2 }],
     { fetch: mock.fetch, delayMs: 0 },
   );
-  assert.equal(result.rows[0].status, "ambiguous");
-  assert.equal(result.rows[0].candidates.length, 2);
+  assert.deepEqual(
+    result.rows.map((r) => [r.name, r.status, r.reason, r.plannedQuantity, r.variantCount]),
+    [
+      ["重複候補 A", "option", "PRODUCT_VARIANT", 0, 2],
+      ["重複候補 B", "option", "PRODUCT_VARIANT", 0, 2],
+    ],
+  );
 });
 
 test("marks sold-out candidates unselectable", async () => {
@@ -143,7 +172,7 @@ test("reports malformed result markup as a site-change error on that search's ro
   assert.equal(result.rows[0].reason, "LOOKUP_SITE_CHANGED");
   assert.equal(result.rows[0].selected, false);
   // A failed prefix search is not retried card by card.
-  assert.deepEqual(mock.calls, ["Kka/W102"]);
+  assert.deepEqual(mock.calls, ["Kka/W102", "Kka/W102 [damaged]"]);
 });
 
 test("a failed search does not discard rows resolved by other searches", async () => {
@@ -158,7 +187,7 @@ test("a failed search does not discard rows resolved by other searches", async (
   assert.deepEqual(result.rows.map((row) => row.status), ["ready", "error"]);
   assert.equal(result.rows[1].reason, "LOOKUP_HTTP");
   assert.match(result.rows[1].errorMessage, /HTTP 503/);
-  assert.equal(result.queries[1].error, "LOOKUP_HTTP");
+  assert.equal(result.queries.find((q) => q.query === "SMP/W99" && q.condition === "normal").error, "LOOKUP_HTTP");
 });
 
 test("cancelling rejects the lookup and ends the delay between searches", async () => {
@@ -181,7 +210,8 @@ test("cancelling rejects the lookup and ends the delay between searches", async 
 test("retries transient search failures but does not retry definite client errors", async () => {
   let attempts = 0;
   const transient = {
-    fetch: async () => {
+    fetch: async (url) => {
+      if (isDamagedSearch(url)) return response(fixture("search-empty.html"));
       attempts += 1;
       if (attempts < 2) return response("server", 503);
       return response(fixture("search-exact.html"));
@@ -196,7 +226,8 @@ test("retries transient search failures but does not retry definite client error
 
   let badAttempts = 0;
   const bad = {
-    fetch: async () => {
+    fetch: async (url) => {
+      if (isDamagedSearch(url)) return response(fixture("search-empty.html"));
       badAttempts += 1;
       return response("bad", 404);
     },
@@ -213,7 +244,7 @@ test("retries transient search failures but does not retry definite client error
 });
 
 test("allocates condition quantities based on prefer-damaged preference", async () => {
-  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const mock = fakeFetch(conditionRoutes());
   const result = await lookupProducts(
     [{ originalId: "Kka/W102-005SEC", requestedQuantity: 4, sourceLines: [1] }],
     { fetch: mock.fetch, delayMs: 0, conditionPreference: "prefer-damaged" },
@@ -233,7 +264,7 @@ test("allocates condition quantities based on prefer-damaged preference", async 
 });
 
 test("allocates condition quantities based on prefer-normal preference", async () => {
-  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const mock = fakeFetch(conditionRoutes());
   const result = await lookupProducts(
     [{ originalId: "Kka/W102-005SEC", requestedQuantity: 4, sourceLines: [1] }],
     { fetch: mock.fetch, delayMs: 0, conditionPreference: "prefer-normal" },
@@ -249,7 +280,7 @@ test("allocates condition quantities based on prefer-normal preference", async (
 });
 
 test("respects explicit damaged condition request while keeping normal option available", async () => {
-  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const mock = fakeFetch(conditionRoutes());
   const result = await lookupProducts(
     [{ originalId: "Kka/W102-005SEC", requestedQuantity: 2, condition: "damaged", sourceLines: [1] }],
     { fetch: mock.fetch, delayMs: 0 },
@@ -326,7 +357,7 @@ test("IDs sold in one rarity resolve to a single row", async () => {
 });
 
 test("defaults to normal first when no preference is given", async () => {
-  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const mock = fakeFetch(conditionRoutes());
   const result = await lookupProducts(["Kka/W102-005SEC"], { fetch: mock.fetch, delayMs: 0 });
   assert.deepEqual(
     result.rows.map((r) => [r.condition, r.plannedQuantity, r.selected]),
@@ -338,7 +369,7 @@ test("defaults to normal first when no preference is given", async () => {
 });
 
 test("an -only preference still offers the other condition at zero", async () => {
-  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const mock = fakeFetch(conditionRoutes());
   const result = await lookupProducts(
     [{ originalId: "Kka/W102-005SEC", requestedQuantity: 4, sourceLines: [1] }],
     { fetch: mock.fetch, delayMs: 0, conditionPreference: "normal-only" },
@@ -374,7 +405,7 @@ test("a missing condition is reported with the other condition offered", async (
 });
 
 test("drops option rows for products another line already resolves to", async () => {
-  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const mock = fakeFetch(conditionRoutes());
   const result = await lookupProducts(
     [
       { originalId: "Kka/W102-005SEC", requestedQuantity: 4, sourceLines: [1] },
@@ -392,7 +423,7 @@ test("drops option rows for products another line already resolves to", async ()
 });
 
 test("keeps only the first of repeated option rows", async () => {
-  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const mock = fakeFetch(conditionRoutes());
   const result = await lookupProducts(
     [
       { originalId: "Kka/W102-005SEC", requestedQuantity: 1, sourceLines: [1] },
@@ -411,7 +442,7 @@ test("keeps only the first of repeated option rows", async () => {
 });
 
 test("an unused fallback condition is shown as an option", async () => {
-  const mock = fakeFetch({ "Kka/W102": fixture("search-with-damaged.html") });
+  const mock = fakeFetch(conditionRoutes());
   const result = await lookupProducts(["Kka/W102-005SEC"], { fetch: mock.fetch, delayMs: 0 });
   assert.deepEqual(
     result.rows.map((r) => [r.condition, r.status, r.reason, r.plannedQuantity]),
@@ -428,7 +459,8 @@ for (const phase of ['headers', 'body']) {
     const signals = [];
     const result = await lookupProducts(['Kka/W102-005SEC'], {
       timeoutMs: 10, maxRetries: 1, retryBaseMs: 0,
-      fetch: async (_url, init) => {
+      fetch: async (url, init) => {
+        if (isDamagedSearch(url)) return response(fixture("search-empty.html"));
         calls++;
         signals.push(init.signal);
         if (phase === 'headers') return new Promise(() => {});
@@ -441,3 +473,80 @@ for (const phase of ['headers', 'body']) {
     assert.equal(result.rows[0].reason, 'LOOKUP_NETWORK');
   });
 }
+
+test("searches damaged copies separately and fills a normal shortfall from them", async () => {
+  const mock = fakeFetch(conditionRoutes());
+  const result = await lookupProducts(
+    [{ originalId: "Kka/W102-005SEC", requestedQuantity: 4 }],
+    { fetch: mock.fetch, delayMs: 0 },
+  );
+  assert.deepEqual(
+    result.rows.map((r) => [r.condition, r.product.kizu, r.plannedQuantity, r.priceYen]),
+    [
+      ["normal", "0", 2, 12800],
+      ["damaged", "1", 2, 10000],
+    ],
+  );
+  assert.deepEqual(result.queries.map((q) => [q.condition, new URL(q.url).searchParams.get("kizu")]), [
+    ["normal", null],
+    ["damaged", "1"],
+  ]);
+});
+
+test("a failed damaged search only blocks requests limited to damaged copies", async () => {
+  const mock = fakeFetch({
+    "Kka/W102": fixture("search-normal-copies.html"),
+    "Kka/W102 [damaged]": () => response("server", 503),
+  });
+  const result = await lookupProducts(
+    [
+      { originalId: "Kka/W102-005SEC", requestedQuantity: 1 },
+      { originalId: "Kka/W102-005SEC", requestedQuantity: 1, condition: "damaged" },
+    ],
+    { fetch: mock.fetch, delayMs: 0, maxRetries: 0 },
+  );
+  assert.deepEqual(
+    result.rows.map((r) => [r.condition, r.status, r.reason]),
+    [
+      ["normal", "ready", null],
+      ["damaged", "error", "LOOKUP_HTTP"],
+    ],
+  );
+});
+
+test("follows a prefix search onto later result pages", async () => {
+  const page = (cid, id) => `
+    <div class="card-product">
+      <a href="/sell/ws/card/hol/${cid}"><img class="card" alt="${id} C カード"></a>
+      <span class="border">${id}</span><h4>カード</h4><strong>30 円</strong>
+      <input class="cart_gid" value="7"><input class="cart_ver" value="hol"><input class="cart_cid" value="${cid}"><input class="cart_kizu" value="0"><input class="cart_limit" value="4"><input class="cart_active" value="4">
+    </div>`;
+  const pager = '<a href="https://yuyu-tei.jp/sell/ws/s/search?search_word=HOL%2FW91&page=2">2</a>';
+  const mock = fakeFetch({
+    "HOL/W91": page("10001", "HOL/W91-001") + pager,
+    "HOL/W91 [page 2]": page("10200", "HOL/W91-120") + pager,
+  });
+  const result = await lookupProducts(["HOL/W91-001", "HOL/W91-120"], { fetch: mock.fetch, delayMs: 0 });
+  assert.deepEqual(mock.calls, ["HOL/W91", "HOL/W91 [page 2]", "HOL/W91 [damaged]"]);
+  assert.deepEqual(result.rows.map((r) => [r.printedId, r.status]), [
+    ["HOL/W91-001", "ready"],
+    ["HOL/W91-120", "ready"],
+  ]);
+});
+
+test("reads star rarities and matches them from an asterisk alias", async () => {
+  const card = (cid, id, rarity) => `
+    <div class="card-product">
+      <a href="/sell/ws/card/nik/${cid}"><img class="card" alt="${id} ${rarity} カード(サイン入り)"></a>
+      <span class="border">${id}</span><h4>カード</h4><strong>980 円</strong>
+      <input class="cart_gid" value="7"><input class="cart_ver" value="nik"><input class="cart_cid" value="${cid}"><input class="cart_kizu" value="0"><input class="cart_limit" value="2"><input class="cart_active" value="2">
+    </div>`;
+  const mock = fakeFetch({
+    "NIK/S135": card("10001", "NIK/S135-001S", "SR★★★") + card("10002", "NIK/S135-001S", "SR★"),
+  });
+  const result = await lookupProducts(
+    [{ originalId: "NIK/S135-001S", requestedQuantity: 1, rarity: "SR***" }],
+    { fetch: mock.fetch, delayMs: 0 },
+  );
+  assert.deepEqual(result.rows.map((r) => [r.rarity, r.status, r.product.cid]), [["SR★★★", "ready", "10001"]]);
+});

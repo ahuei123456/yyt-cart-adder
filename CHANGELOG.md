@@ -3,6 +3,23 @@
 Each version here is what Tampermonkey installs from `dist/`. CI requires an
 entry for every version bump.
 
+## 0.4.0
+
+- Damaged copies are found. YYT lists them only in a separate `kizu=1`
+  search, which the script never ran, so `damaged` lines, the damaged
+  settings and the damaged fallback found nothing. Each prefix is now
+  searched for normal and for damaged copies.
+- Searches too big for one page (600 cards, such as HOL/W91) are followed
+  onto later pages instead of searching each missing card one by one.
+- An ID sold as several products in one rarity (gold- and pink-foil
+  GU/W88-006SSP) offers each version at quantity 0 instead of being skipped.
+- Star rarities are read (`SR★`, `SR★★`, `SR★★★`), and can be typed as
+  `SR*`, `SR**`, `SR***`. Symbol and no-rarity labels (`M@P`, `-`) are read
+  too.
+- Full-width input (`Ｋｋａ／Ｗ１０２－００５ＳＥＣ`) is read as half-width.
+- Tests and the site check parse pages with jsdom; the site check also covers
+  damaged copies, a second results page and star rarities.
+
 ## 0.3.2
 
 - Lines whose first token is not a card ID (`UnusualCard`, `W102-005`,

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YYT Weiss Schwarz Cart Adder
 // @namespace    local.yyt-cart-adder
-// @version      0.3.2
+// @version      0.4.0
 // @description  Resolve Weiss Schwarz card IDs and add reviewed quantities to a YYT cart.
 // @homepageURL  https://github.com/ahuei123456/yyt-cart-adder
 // @updateURL    https://raw.githubusercontent.com/ahuei123456/yyt-cart-adder/master/dist/yyt-cart-adder.user.js
@@ -21,7 +21,7 @@
     PRODUCT_MISSING: "PRODUCT_MISSING",
     PRODUCT_RARITY_MISSING: "PRODUCT_RARITY_MISSING",
     PRODUCT_CONDITION_MISSING: "PRODUCT_CONDITION_MISSING",
-    PRODUCT_AMBIGUOUS: "PRODUCT_AMBIGUOUS",
+    PRODUCT_VARIANT: "PRODUCT_VARIANT",
     PRODUCT_SOLD_OUT: "PRODUCT_SOLD_OUT",
     PRODUCT_PARTIAL_STOCK: "PRODUCT_PARTIAL_STOCK",
     PRODUCT_OTHER_RARITY: "PRODUCT_OTHER_RARITY",
@@ -133,10 +133,10 @@
     }
     return null;
   }
-  var RARITY_PATTERN = /^(?:[A-Za-z]{1,2}-)?[A-Za-z]{1,4}\+?$/u;
+  var RARITY_PATTERN = /^(?:(?:[A-Z]{1,2}-)?[A-Z@]{1,5}(?:\+|★{1,3})?|-)$/u;
   function normalizeRarity(value) {
     if (value == null) return null;
-    const text = String(value).trim().toLocaleUpperCase("en-US");
+    const text = String(value).normalize("NFKC").trim().toLocaleUpperCase("en-US").replace(/[*☆]/gu, "\u2605");
     return RARITY_PATTERN.test(text) ? text : null;
   }
   function readRarity(element, printedId, sectionRarity) {
@@ -259,6 +259,14 @@
     }
     return cards;
   }
+  function readLastPage(document2) {
+    let last = 1;
+    for (const link of queryAll(document2, 'a[href*="page="]')) {
+      const match = /[?&]page=(\d+)/u.exec(getAttribute(link, "href") ?? "");
+      if (match) last = Math.max(last, Number(match[1]));
+    }
+    return last;
+  }
   function parseSearchResults(html) {
     const source = String(html ?? "");
     const document2 = new DOMParser().parseFromString(source, "text/html");
@@ -271,13 +279,15 @@
       else rejected.push(parsed.error);
     }
     const explicitEmpty = looksLikeExplicitEmptyResult(source);
+    const lastPage = readLastPage(document2);
     const structureError = cardElements.length > 0 && products.length === 0 || cardElements.length === 0 && source.trim() !== "" && !explicitEmpty;
     return {
       products,
       rejected,
       cardProductCount: cardElements.length,
       structureError,
-      explicitEmpty
+      explicitEmpty,
+      lastPage
     };
   }
 
@@ -307,13 +317,13 @@
     }
     return null;
   }
-  var RARITY_TOKEN_PATTERN = /^(?:[A-Z]{1,2}-)?[A-Z]{1,4}\+?$/u;
+  var RARITY_TOKEN_PATTERN = /^(?:[A-Z]{1,2}-)?[A-Z@]{1,5}(?:\+|[★☆*]{1,3})?$/u;
   function parseRarityToken(token) {
     if (typeof token !== "string" || !RARITY_TOKEN_PATTERN.test(token)) return null;
-    return token;
+    return normalizeRarity(token);
   }
   function parseLine(raw, lineNumber) {
-    const trimmed = raw.trim();
+    const trimmed = raw.normalize("NFKC").trim();
     if (!trimmed || trimmed.startsWith("#")) {
       return { kind: "ignored" };
     }
@@ -617,9 +627,11 @@
     }
     return "https://yuyu-tei.jp";
   }
-  function makeSearchUrl(query, options) {
+  function makeSearchUrl(query, options, { condition = "normal", page = 1 } = {}) {
     const url = new URL("/sell/ws/s/search", getOrigin(options));
     url.searchParams.set("search_word", query);
+    if (condition === "damaged") url.searchParams.set("kizu", "1");
+    if (page > 1) url.searchParams.set("page", String(page));
     return url.toString();
   }
   function retryAfterMilliseconds(response) {
@@ -646,11 +658,11 @@
   function isAbortError(error) {
     return error?.name === "AbortError" || error?.code === "ABORT_ERR";
   }
-  async function fetchSearchPage(query, options = {}) {
+  async function fetchSearchPage(query, options = {}, page = {}) {
     const fetchFunction = getFetch(options);
     const maxRetries = Number.isInteger(options.maxRetries) ? Math.max(0, options.maxRetries) : 2;
     const retryBaseMs = Number.isFinite(options.retryBaseMs) ? Math.max(0, options.retryBaseMs) : 250;
-    const url = makeSearchUrl(String(query), options);
+    const url = makeSearchUrl(String(query), options, page);
     let attempt = 0;
     while (true) {
       let response;
@@ -746,9 +758,6 @@
   function makeErrorRow(request, error) {
     return unresolvedRow(request, "error", error.code, { errorMessage: error.message });
   }
-  function makeAmbiguousRow(request, candidates) {
-    return unresolvedRow(request, "ambiguous", ERROR_CODES.PRODUCT_AMBIGUOUS, { candidates });
-  }
   function buildRow(request, product, plannedQuantity, stock, statusOverride = null) {
     const soldOut = Boolean(product.soldOut) || stock <= 0;
     const status = statusOverride ? statusOverride : soldOut ? "sold-out" : plannedQuantity < request.requestedQuantity ? "partial" : "ready";
@@ -790,6 +799,19 @@
       isOption: true
     };
   }
+  function makeVariantRows(request, candidates) {
+    return candidates.map((product) => ({
+      ...asOption(buildRow(request, product, 0, numbersForProduct(product).stock), ERROR_CODES.PRODUCT_VARIANT),
+      variantCount: candidates.length
+    }));
+  }
+  function otherConditionRows(request, candidates) {
+    return candidates.map((product) => asOption(buildRow(request, product, 0, numbersForProduct(product).stock), ERROR_CODES.PRODUCT_OTHER_CONDITION));
+  }
+  function strictCondition(request, options) {
+    const preference = options.conditionPreference || "prefer-normal";
+    return request.condition ?? (preference === "normal-only" ? "normal" : preference === "damaged-only" ? "damaged" : null);
+  }
   function productKey(product) {
     return product ? [product.ver, product.cid, product.kizu].join("|") : null;
   }
@@ -825,7 +847,7 @@
     }
     const groups = groupByRarity(exact);
     if (groups.length === 1) return makeConditionRows(request, exact, options);
-    if (groups.some((group) => group.rarity == null)) return [makeAmbiguousRow(request, exact)];
+    if (groups.some((group) => group.rarity == null)) return makeVariantRows(request, exact);
     const rowsByGroup = groups.map((group) => makeConditionRows(request, group.products, options));
     const primaryIndex = Math.max(0, rowsByGroup.findIndex((rows) => rows.some(isResolvedRow)));
     const rarities = groups.map((group) => group.rarity);
@@ -840,17 +862,14 @@
     const normal = exact.filter((c) => String(c.kizu).trim() === "0");
     const damaged = exact.filter((c) => String(c.kizu).trim() !== "0");
     const preference = options.conditionPreference || "prefer-normal";
-    const strict = request.condition ?? (preference === "normal-only" ? "normal" : preference === "damaged-only" ? "damaged" : null);
+    const strict = strictCondition(request, options);
     if (strict) {
       const [wanted, other] = strict === "normal" ? [normal, damaged] : [damaged, normal];
-      if (wanted.length > 1) return [makeAmbiguousRow(request, wanted)];
-      const primary = wanted.length ? makeSingleRow(request, wanted[0], request.requestedQuantity) : { ...makeMissingRow(request, ERROR_CODES.PRODUCT_CONDITION_MISSING), condition: strict };
-      if (other.length !== 1) return [primary];
-      const otherRow = buildRow(request, other[0], 0, numbersForProduct(other[0]).stock);
-      return [primary, asOption(otherRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
+      const primary = wanted.length > 1 ? makeVariantRows(request, wanted) : wanted.length ? [makeSingleRow(request, wanted[0], request.requestedQuantity)] : [{ ...makeMissingRow(request, ERROR_CODES.PRODUCT_CONDITION_MISSING), condition: strict }];
+      return [...primary, ...otherConditionRows(request, other)];
     }
     if (normal.length > 1 || damaged.length > 1) {
-      return [makeAmbiguousRow(request, exact)];
+      return makeVariantRows(request, exact);
     }
     if (normal.length === 1 && damaged.length === 0) {
       return [makeSingleRow(request, normal[0], request.requestedQuantity)];
@@ -876,6 +895,18 @@
     const delay = Number.isFinite(options.delayMs) ? Math.max(0, options.delayMs) : 250;
     if (queryNumber > 0) await sleep(delay, options);
   }
+  var MAX_PAGES = 10;
+  var CONDITIONS = ["normal", "damaged"];
+  function hasCandidate(candidatesById, normalizedId, condition) {
+    return (candidatesById.get(normalizedId) ?? []).some((product) => product.condition === condition);
+  }
+  function blockingFailure(request, candidatesById, failures, options) {
+    const failed = (condition) => failures.get(`${request.normalizedId}|${condition}`);
+    const strict = strictCondition(request, options);
+    if (strict) return hasCandidate(candidatesById, request.normalizedId, strict) ? null : failed(strict) ?? null;
+    if (candidatesById.has(request.normalizedId)) return null;
+    return failed("normal") ?? failed("damaged") ?? null;
+  }
   function queryExpectedIds(values) {
     return new Set(values.map((value) => normalizePrintedId(requestId(value))).filter(Boolean));
   }
@@ -899,59 +930,68 @@
     const normalizedRequests = requests.map(makeRequest);
     const expectedIds = new Set(normalizedRequests.map((request) => request.normalizedId));
     const candidatesById = /* @__PURE__ */ new Map();
-    const failuresById = /* @__PURE__ */ new Map();
+    const failures = /* @__PURE__ */ new Map();
     const queries = [];
     const { groups, fallbackIds } = buildLookupPlan(normalizedRequests);
     let queryNumber = 0;
-    const runQuery = async (type, query, queryIds, progress) => {
-      await delayBetweenQueries(options, queryNumber);
-      queryNumber += 1;
-      notify(options.onProgress, { type, query, ...progress });
+    const runQuery = async (type, query, queryIds, condition, progress) => {
+      notify(options.onProgress, { type, query, condition, ...progress });
+      let lastPage = 1;
       try {
-        const page = await fetchSearchPage(query, options);
-        const parsed = parseSearchResults(page.html);
-        assertStructure(parsed, query, queryIds);
-        mergeCandidates(candidatesById, matchingProducts(parsed.products, expectedIds));
-        queries.push({
-          type,
-          query,
-          url: page.url,
-          status: page.status,
-          cardProductCount: parsed.cardProductCount,
-          productCount: parsed.products.length
-        });
+        for (let page = 1; page <= lastPage; page += 1) {
+          await delayBetweenQueries(options, queryNumber);
+          queryNumber += 1;
+          const result = await fetchSearchPage(query, options, { condition, page });
+          const parsed = parseSearchResults(result.html);
+          assertStructure(parsed, query, queryIds);
+          mergeCandidates(candidatesById, matchingProducts(parsed.products, expectedIds));
+          queries.push({
+            type,
+            query,
+            condition,
+            page,
+            url: result.url,
+            status: result.status,
+            cardProductCount: parsed.cardProductCount,
+            productCount: parsed.products.length
+          });
+          if (page === 1) lastPage = Math.min(Math.max(1, parsed.lastPage ?? 1), MAX_PAGES);
+        }
       } catch (error) {
         if (options.signal?.aborted || !(error instanceof LookupError)) throw error;
-        for (const id of queryIds) failuresById.set(id, error);
-        queries.push({ type, query, url: error.url ?? null, status: error.status ?? null, error: error.code });
+        for (const id of queryIds) {
+          if (!hasCandidate(candidatesById, id, condition)) failures.set(`${id}|${condition}`, error);
+        }
+        queries.push({ type, query, condition, url: error.url ?? null, status: error.status ?? null, error: error.code });
       }
     };
-    let groupIndex = 0;
-    for (const [prefix, values] of groups) {
-      await runQuery("prefix", prefix, queryExpectedIds(values), { index: groupIndex, total: groups.size });
-      groupIndex += 1;
+    const prefixSearches = [...groups].flatMap(([prefix, values]) => CONDITIONS.map((condition) => ({ prefix, ids: queryExpectedIds(values), condition })));
+    for (const [index, { prefix, ids, condition }] of prefixSearches.entries()) {
+      await runQuery("prefix", prefix, ids, condition, { index, total: prefixSearches.length });
     }
+    const exactSearches = [];
+    const exactSeen = /* @__PURE__ */ new Set();
+    const addExact = (request, condition) => {
+      const key = `${request.normalizedId}|${condition}`;
+      if (exactSeen.has(key)) return;
+      exactSeen.add(key);
+      exactSearches.push({ request, condition });
+    };
+    for (const request of fallbackIds) CONDITIONS.forEach((condition) => addExact(request, condition));
     for (const request of normalizedRequests) {
-      if (!candidatesById.has(request.normalizedId) && !failuresById.has(request.normalizedId)) {
-        fallbackIds.push(request);
+      if (!candidatesById.has(request.normalizedId) && !failures.has(`${request.normalizedId}|normal`)) {
+        addExact(request, "normal");
       }
     }
-    const exactFallbacks = [];
-    const fallbackSeen = /* @__PURE__ */ new Set();
-    for (const request of fallbackIds) {
-      if (fallbackSeen.has(request.normalizedId)) continue;
-      fallbackSeen.add(request.normalizedId);
-      exactFallbacks.push(request);
-    }
-    for (const [fallbackIndex, request] of exactFallbacks.entries()) {
-      await runQuery("exact", request.originalId, /* @__PURE__ */ new Set([request.normalizedId]), {
-        index: fallbackIndex,
-        total: exactFallbacks.length
+    for (const [index, { request, condition }] of exactSearches.entries()) {
+      await runQuery("exact", request.originalId, /* @__PURE__ */ new Set([request.normalizedId]), condition, {
+        index,
+        total: exactSearches.length
       });
     }
     const rows = dropDuplicateOptions(
       normalizedRequests.flatMap((request) => {
-        const failure = candidatesById.has(request.normalizedId) ? null : failuresById.get(request.normalizedId);
+        const failure = blockingFailure(request, candidatesById, failures, options);
         return failure ? [makeErrorRow(request, failure)] : makeRows(request, candidatesById.get(request.normalizedId), options);
       })
     );
@@ -1665,11 +1705,10 @@ a { color: #175cd3; }
     const also = row.otherRarities?.length ? ` (also sold as ${row.otherRarities.join(", ")})` : "";
     const messages = {
       ready: `Ready${also}`,
-      option: row.reason === ERROR_CODES.PRODUCT_OTHER_CONDITION ? `${cond === "damaged" ? "Damaged" : "Normal"} copy; set a quantity to add` : `Same ID in another rarity${also}; set a quantity to add`,
+      option: row.reason === ERROR_CODES.PRODUCT_OTHER_CONDITION ? `${cond === "damaged" ? "Damaged" : "Normal"} copy; set a quantity to add` : row.reason === ERROR_CODES.PRODUCT_VARIANT ? `One of ${row.variantCount} versions of this ID (see name); requested ${row.requestedQuantity}, set quantities to add` : `Same ID in another rarity${also}; set a quantity to add`,
       partial: `Requested ${row.requestedQuantity}; adding ${row.plannedQuantity}`,
       "sold-out": `Card is sold out in ${cond} condition`,
       missing: row.reason === ERROR_CODES.PRODUCT_RARITY_MISSING ? `No ${row.rarity} product for this ID` : row.reason === ERROR_CODES.PRODUCT_CONDITION_MISSING ? `No ${cond} copy for this ID` : "No exact card found",
-      ambiguous: "Multiple exact products found; skipped",
       error: row.reason === ERROR_CODES.LOOKUP_SITE_CHANGED ? "YYT's search page could not be read; skipped" : `Search failed (${row.errorMessage || row.reason}); skipped`,
       invalid: row.reason || "Invalid input"
     };
@@ -1768,7 +1807,7 @@ a { color: #175cd3; }
       });
       setView(
         el("p", { className: "warning", text: "Quantities below will be added to anything already in your cart." }),
-        el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged'/1 or 'normal'/0 to fix a line's condition (this overrides the setting above), and a rarity such as RR or S-RR when an ID is sold in more than one. Lines beginning with # are ignored." }),
+        el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged'/1 or 'normal'/0 to fix a line's condition (this overrides the setting above), and a rarity such as RR, S-RR or SR** (for SR\u2605\u2605) when an ID is sold in more than one. Lines beginning with # are ignored." }),
         el("label", { for: "yyt-condition-preference", text: "Condition for lines without one" }, prefSelect),
         el("label", { for: "yyt-card-list", text: "Card IDs and quantities" }, input),
         errorBox,
@@ -1786,8 +1825,9 @@ a { color: #175cd3; }
         const rows = await resolve(parsed.requests, {
           signal,
           conditionPreference,
-          onProgress: ({ type, query, index, total }) => {
-            message.textContent = type === "exact" ? `Searching individually for ${query} (${index + 1} of ${total})\u2026` : `Searching ${query} (${index + 1} of ${total})\u2026`;
+          onProgress: ({ type, query, condition, index, total }) => {
+            const copies = condition === "damaged" ? " damaged copies" : "";
+            message.textContent = type === "exact" ? `Searching individually for ${query}${copies} (${index + 1} of ${total})\u2026` : `Searching ${query}${copies} (${index + 1} of ${total})\u2026`;
           }
         });
         const invalidRows = parsed.errors.map((item) => ({

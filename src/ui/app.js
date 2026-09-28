@@ -24,7 +24,9 @@ function statusReason(row) {
     ready: `Ready${also}`,
     option: row.reason === ERROR_CODES.PRODUCT_OTHER_CONDITION
       ? `${cond === "damaged" ? "Damaged" : "Normal"} copy; set a quantity to add`
-      : `Same ID in another rarity${also}; set a quantity to add`,
+      : row.reason === ERROR_CODES.PRODUCT_VARIANT
+        ? `One of ${row.variantCount} versions of this ID (see name); requested ${row.requestedQuantity}, set quantities to add`
+        : `Same ID in another rarity${also}; set a quantity to add`,
     partial: `Requested ${row.requestedQuantity}; adding ${row.plannedQuantity}`,
     "sold-out": `Card is sold out in ${cond} condition`,
     missing: row.reason === ERROR_CODES.PRODUCT_RARITY_MISSING
@@ -32,7 +34,6 @@ function statusReason(row) {
       : row.reason === ERROR_CODES.PRODUCT_CONDITION_MISSING
         ? `No ${cond} copy for this ID`
         : "No exact card found",
-    ambiguous: "Multiple exact products found; skipped",
     error: row.reason === ERROR_CODES.LOOKUP_SITE_CHANGED
       ? "YYT's search page could not be read; skipped"
       : `Search failed (${row.errorMessage || row.reason}); skipped`,
@@ -125,7 +126,7 @@ export function mountApp({ parse, resolve, addItems }) {
     });
     setView(
       el("p", { className: "warning", text: "Quantities below will be added to anything already in your cart." }),
-      el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged'/1 or 'normal'/0 to fix a line's condition (this overrides the setting above), and a rarity such as RR or S-RR when an ID is sold in more than one. Lines beginning with # are ignored." }),
+      el("p", { className: "hint", text: "One exact printed card ID per line; quantity defaults to 1. Append 'damaged'/1 or 'normal'/0 to fix a line's condition (this overrides the setting above), and a rarity such as RR, S-RR or SR** (for SR★★) when an ID is sold in more than one. Lines beginning with # are ignored." }),
       el("label", { for: "yyt-condition-preference", text: "Condition for lines without one" }, prefSelect),
       el("label", { for: "yyt-card-list", text: "Card IDs and quantities" }, input),
       errorBox,
@@ -144,10 +145,11 @@ export function mountApp({ parse, resolve, addItems }) {
       const rows = await resolve(parsed.requests, {
         signal,
         conditionPreference,
-        onProgress: ({ type, query, index, total }) => {
+        onProgress: ({ type, query, condition, index, total }) => {
+          const copies = condition === "damaged" ? " damaged copies" : "";
           message.textContent = type === "exact"
-            ? `Searching individually for ${query} (${index + 1} of ${total})…`
-            : `Searching ${query} (${index + 1} of ${total})…`;
+            ? `Searching individually for ${query}${copies} (${index + 1} of ${total})…`
+            : `Searching ${query}${copies} (${index + 1} of ${total})…`;
         },
       });
       const invalidRows = parsed.errors.map((item) => ({

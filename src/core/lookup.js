@@ -116,9 +116,15 @@ function getOrigin(options) {
   return "https://yuyu-tei.jp";
 }
 
-function makeSearchUrl(query, options) {
+/**
+ * YYT lists normal and damaged copies in separate searches: without `kizu`
+ * a search shows only normal copies, with `kizu=1` only damaged ones.
+ */
+function makeSearchUrl(query, options, { condition = "normal", page = 1 } = {}) {
   const url = new URL("/sell/ws/s/search", getOrigin(options));
   url.searchParams.set("search_word", query);
+  if (condition === "damaged") url.searchParams.set("kizu", "1");
+  if (page > 1) url.searchParams.set("page", String(page));
   return url.toString();
 }
 
@@ -155,14 +161,16 @@ function isAbortError(error) {
 }
 
 /**
- * Fetch one HTML search page.  GET lookups may retry network, 429, and 5xx
- * failures; cart mutation code must not reuse this helper for POST requests.
+ * Fetch one HTML search page.  `page.condition` ("normal" or "damaged") and
+ * `page.page` pick which copies and which page of results.  GET lookups may
+ * retry network, 429, and 5xx failures; cart mutation code must not reuse
+ * this helper for POST requests.
  */
-export async function fetchSearchPage(query, options = {}) {
+export async function fetchSearchPage(query, options = {}, page = {}) {
   const fetchFunction = getFetch(options);
   const maxRetries = Number.isInteger(options.maxRetries) ? Math.max(0, options.maxRetries) : 2;
   const retryBaseMs = Number.isFinite(options.retryBaseMs) ? Math.max(0, options.retryBaseMs) : 250;
-  const url = makeSearchUrl(String(query), options);
+  const url = makeSearchUrl(String(query), options, page);
   let attempt = 0;
 
   while (true) {
@@ -243,7 +251,7 @@ function numbersForProduct(product) {
 }
 
 /**
- * A row with no product to add: missing, ambiguous, or its search failed.
+ * A row with no product to add: missing, or its search failed.
  */
 function unresolvedRow(request, status, reason, extra = {}) {
   return {
@@ -273,10 +281,6 @@ function makeMissingRow(request, reason = ERROR_CODES.PRODUCT_MISSING) {
  */
 function makeErrorRow(request, error) {
   return unresolvedRow(request, "error", error.code, { errorMessage: error.message });
-}
-
-function makeAmbiguousRow(request, candidates) {
-  return unresolvedRow(request, "ambiguous", ERROR_CODES.PRODUCT_AMBIGUOUS, { candidates });
 }
 
 function buildRow(request, product, plannedQuantity, stock, statusOverride = null) {
@@ -341,6 +345,34 @@ function asOption(row, reason) {
   };
 }
 
+/**
+ * Several products can share an ID, rarity and condition: GU/W88-006SSP is
+ * sold as a gold-foil and a pink-foil signed card.  Only the name tells them
+ * apart, so nothing is chosen automatically; each is offered at zero for the
+ * user to pick in review.
+ */
+function makeVariantRows(request, candidates) {
+  return candidates.map((product) => ({
+    ...asOption(buildRow(request, product, 0, numbersForProduct(product).stock), ERROR_CODES.PRODUCT_VARIANT),
+    variantCount: candidates.length,
+  }));
+}
+
+function otherConditionRows(request, candidates) {
+  return candidates.map((product) =>
+    asOption(buildRow(request, product, 0, numbersForProduct(product).stock), ERROR_CODES.PRODUCT_OTHER_CONDITION));
+}
+
+/**
+ * The condition a request is limited to: the one on its input line, else the
+ * one an "-only" setting names, else null.
+ */
+function strictCondition(request, options) {
+  const preference = options.conditionPreference || "prefer-normal";
+  return request.condition ??
+    (preference === "normal-only" ? "normal" : preference === "damaged-only" ? "damaged" : null);
+}
+
 export function productKey(product) {
   return product ? [product.ver, product.cid, product.kizu].join("|") : null;
 }
@@ -398,7 +430,7 @@ export function makeRows(request, candidates, options = {}) {
   if (groups.length === 1) return makeConditionRows(request, exact, options);
   // Products share an ID but at least one has no readable rarity, so there is
   // no label to tell them apart.
-  if (groups.some((group) => group.rarity == null)) return [makeAmbiguousRow(request, exact)];
+  if (groups.some((group) => group.rarity == null)) return makeVariantRows(request, exact);
 
   const rowsByGroup = groups.map((group) => makeConditionRows(request, group.products, options));
   const primaryIndex = Math.max(0, rowsByGroup.findIndex((rows) => rows.some(isResolvedRow)));
@@ -422,24 +454,21 @@ function makeConditionRows(request, exact, options) {
   // "-only" setting names the condition.  Either way nothing is added
   // automatically from the other condition, but it is shown at zero so the
   // user can take it instead in review.
-  const strict =
-    request.condition ??
-    (preference === "normal-only" ? "normal" : preference === "damaged-only" ? "damaged" : null);
+  const strict = strictCondition(request, options);
   if (strict) {
     const [wanted, other] = strict === "normal" ? [normal, damaged] : [damaged, normal];
-    if (wanted.length > 1) return [makeAmbiguousRow(request, wanted)];
-    const primary = wanted.length
-      ? makeSingleRow(request, wanted[0], request.requestedQuantity)
-      : { ...makeMissingRow(request, ERROR_CODES.PRODUCT_CONDITION_MISSING), condition: strict };
-    if (other.length !== 1) return [primary];
-    const otherRow = buildRow(request, other[0], 0, numbersForProduct(other[0]).stock);
-    return [primary, asOption(otherRow, ERROR_CODES.PRODUCT_OTHER_CONDITION)];
+    const primary = wanted.length > 1
+      ? makeVariantRows(request, wanted)
+      : wanted.length
+        ? [makeSingleRow(request, wanted[0], request.requestedQuantity)]
+        : [{ ...makeMissingRow(request, ERROR_CODES.PRODUCT_CONDITION_MISSING), condition: strict }];
+    return [...primary, ...otherConditionRows(request, other)];
   }
 
   // No condition given: prefer-normal or prefer-damaged fills from that
   // condition first and takes the rest from the other when stock is short.
   if (normal.length > 1 || damaged.length > 1) {
-    return [makeAmbiguousRow(request, exact)];
+    return makeVariantRows(request, exact);
   }
 
   if (normal.length === 1 && damaged.length === 0) {
@@ -474,6 +503,28 @@ async function delayBetweenQueries(options, queryNumber) {
   if (queryNumber > 0) await sleep(delay, options);
 }
 
+// A search shows 600 cards a page; no WS set comes close to this many pages.
+const MAX_PAGES = 10;
+const CONDITIONS = ["normal", "damaged"];
+
+function hasCandidate(candidatesById, normalizedId, condition) {
+  return (candidatesById.get(normalizedId) ?? []).some((product) => product.condition === condition);
+}
+
+/**
+ * The failed search, if any, that leaves a request without an answer: a
+ * failed search for the only condition it may use, or any failed search when
+ * nothing at all was found.  A failed damaged search does not hold up a
+ * request that normal copies can fill, and vice versa.
+ */
+function blockingFailure(request, candidatesById, failures, options) {
+  const failed = (condition) => failures.get(`${request.normalizedId}|${condition}`);
+  const strict = strictCondition(request, options);
+  if (strict) return hasCandidate(candidatesById, request.normalizedId, strict) ? null : failed(strict) ?? null;
+  if (candidatesById.has(request.normalizedId)) return null;
+  return failed("normal") ?? failed("damaged") ?? null;
+}
+
 function queryExpectedIds(values) {
   return new Set(values.map((value) => normalizePrintedId(requestId(value))).filter(Boolean));
 }
@@ -502,8 +553,9 @@ function assertStructure(parsed, query, expectedIds) {
 }
 
 /**
- * Resolve input IDs using one grouped prefix GET per prefix, then exact GET
- * fallbacks for IDs not returned by their prefix response.
+ * Resolve input IDs with one search per prefix and condition (YYT lists
+ * normal and damaged copies separately), following result pages, then exact
+ * searches for IDs a prefix search did not return.
  *
  * A search that fails (HTTP, network, or an unreadable page) marks only the
  * IDs it was for as `error` rows; the rest of the lookup carries on.  IDs whose
@@ -514,71 +566,80 @@ export async function lookupProducts(requests, options = {}) {
   const normalizedRequests = requests.map(makeRequest);
   const expectedIds = new Set(normalizedRequests.map((request) => request.normalizedId));
   const candidatesById = new Map();
-  const failuresById = new Map();
+  // `${normalizedId}|${condition}` -> the LookupError of its failed search.
+  const failures = new Map();
   const queries = [];
   const { groups, fallbackIds } = buildLookupPlan(normalizedRequests);
 
   let queryNumber = 0;
-  const runQuery = async (type, query, queryIds, progress) => {
-    await delayBetweenQueries(options, queryNumber);
-    queryNumber += 1;
-    notify(options.onProgress, { type, query, ...progress });
+  const runQuery = async (type, query, queryIds, condition, progress) => {
+    notify(options.onProgress, { type, query, condition, ...progress });
+    let lastPage = 1;
     try {
-      const page = await fetchSearchPage(query, options);
-      const parsed = parseSearchResults(page.html);
-      assertStructure(parsed, query, queryIds);
-      mergeCandidates(candidatesById, matchingProducts(parsed.products, expectedIds));
-      queries.push({
-        type,
-        query,
-        url: page.url,
-        status: page.status,
-        cardProductCount: parsed.cardProductCount,
-        productCount: parsed.products.length,
-      });
+      for (let page = 1; page <= lastPage; page += 1) {
+        await delayBetweenQueries(options, queryNumber);
+        queryNumber += 1;
+        const result = await fetchSearchPage(query, options, { condition, page });
+        const parsed = parseSearchResults(result.html);
+        assertStructure(parsed, query, queryIds);
+        mergeCandidates(candidatesById, matchingProducts(parsed.products, expectedIds));
+        queries.push({
+          type,
+          query,
+          condition,
+          page,
+          url: result.url,
+          status: result.status,
+          cardProductCount: parsed.cardProductCount,
+          productCount: parsed.products.length,
+        });
+        if (page === 1) lastPage = Math.min(Math.max(1, parsed.lastPage ?? 1), MAX_PAGES);
+      }
     } catch (error) {
       if (options.signal?.aborted || !(error instanceof LookupError)) throw error;
-      for (const id of queryIds) failuresById.set(id, error);
-      queries.push({ type, query, url: error.url ?? null, status: error.status ?? null, error: error.code });
+      // IDs an earlier page of this search already returned are answered.
+      for (const id of queryIds) {
+        if (!hasCandidate(candidatesById, id, condition)) failures.set(`${id}|${condition}`, error);
+      }
+      queries.push({ type, query, condition, url: error.url ?? null, status: error.status ?? null, error: error.code });
     }
   };
 
-  let groupIndex = 0;
-  for (const [prefix, values] of groups) {
-    await runQuery("prefix", prefix, queryExpectedIds(values), { index: groupIndex, total: groups.size });
-    groupIndex += 1;
+  const prefixSearches = [...groups].flatMap(([prefix, values]) =>
+    CONDITIONS.map((condition) => ({ prefix, ids: queryExpectedIds(values), condition })));
+  for (const [index, { prefix, ids, condition }] of prefixSearches.entries()) {
+    await runQuery("prefix", prefix, ids, condition, { index, total: prefixSearches.length });
   }
 
+  // IDs without a usable prefix are searched on their own in both
+  // conditions.  YYT's normal listing includes sold-out cards, so an ID its
+  // prefix search returned nothing for gets one exact normal search too; a
+  // missing damaged copy is normal and is not searched for again.
+  const exactSearches = [];
+  const exactSeen = new Set();
+  const addExact = (request, condition) => {
+    const key = `${request.normalizedId}|${condition}`;
+    if (exactSeen.has(key)) return;
+    exactSeen.add(key);
+    exactSearches.push({ request, condition });
+  };
+  for (const request of fallbackIds) CONDITIONS.forEach((condition) => addExact(request, condition));
   for (const request of normalizedRequests) {
-    if (!candidatesById.has(request.normalizedId) && !failuresById.has(request.normalizedId)) {
-      fallbackIds.push(request);
+    if (!candidatesById.has(request.normalizedId) && !failures.has(`${request.normalizedId}|normal`)) {
+      addExact(request, "normal");
     }
   }
 
-  // An ID can be absent from both prefix groups and the first fallback pass;
-  // dedupe by normalized ID while preserving first-seen spelling.
-  const exactFallbacks = [];
-  const fallbackSeen = new Set();
-  for (const request of fallbackIds) {
-    if (fallbackSeen.has(request.normalizedId)) continue;
-    fallbackSeen.add(request.normalizedId);
-    exactFallbacks.push(request);
-  }
-
-  for (const [fallbackIndex, request] of exactFallbacks.entries()) {
-    await runQuery("exact", request.originalId, new Set([request.normalizedId]), {
-      index: fallbackIndex,
-      total: exactFallbacks.length,
+  for (const [index, { request, condition }] of exactSearches.entries()) {
+    await runQuery("exact", request.originalId, new Set([request.normalizedId]), condition, {
+      index,
+      total: exactSearches.length,
     });
   }
 
   const rows = dropDuplicateOptions(
     normalizedRequests.flatMap((request) => {
-      // Another search can still return this ID's product; only an ID with
-      // no candidates at all is reported as failed.
-      const failure = candidatesById.has(request.normalizedId)
-        ? null
-        : failuresById.get(request.normalizedId);
+      const failure = blockingFailure(request, candidatesById, failures, options);
       return failure
         ? [makeErrorRow(request, failure)]
         : makeRows(request, candidatesById.get(request.normalizedId), options);

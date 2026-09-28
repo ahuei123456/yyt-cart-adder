@@ -1,5 +1,5 @@
 import { ERROR_CODES } from "./errors.js";
-import { extractPrintedId, normalizePrintedId } from "./parser.js";
+import { extractPrintedId, normalizePrintedId, normalizeRarity } from "./parser.js";
 
 const INTEGER_PATTERN = /^\d+$/u;
 const CARD_TOKEN_PATTERN = /^\S+$/u;
@@ -31,18 +31,20 @@ function parseConditionToken(token) {
   return null;
 }
 
-// Rarity labels exactly as printed: `RR`, `S-RR`, `SP`, `SEC+`.  Requiring
-// uppercase keeps a misspelled word (`nope`, `damagd`) an input error instead
-// of an unknown rarity.
-const RARITY_TOKEN_PATTERN = /^(?:[A-Z]{1,2}-)?[A-Z]{1,4}\+?$/u;
+// Rarity labels as printed: `RR`, `S-RR`, `SP`, `SEC+`, `SR★★`, with `*` for
+// `★` (`SR**`).  Requiring uppercase keeps a misspelled word (`nope`,
+// `damagd`) an input error instead of an unknown rarity.
+const RARITY_TOKEN_PATTERN = /^(?:[A-Z]{1,2}-)?[A-Z@]{1,5}(?:\+|[★☆*]{1,3})?$/u;
 
 function parseRarityToken(token) {
   if (typeof token !== "string" || !RARITY_TOKEN_PATTERN.test(token)) return null;
-  return token;
+  return normalizeRarity(token);
 }
 
 function parseLine(raw, lineNumber) {
-  const trimmed = raw.trim();
+  // A Japanese IME types full-width text (`Ｋｋａ／Ｗ１０２－００５ＳＥＣ` and U+3000 spaces),
+  // which YYT's search does not match; NFKC turns it into ASCII.
+  const trimmed = raw.normalize("NFKC").trim();
   if (!trimmed || trimmed.startsWith("#")) {
     return { kind: "ignored" };
   }
